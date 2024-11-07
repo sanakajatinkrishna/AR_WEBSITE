@@ -1,9 +1,7 @@
-// components/ARViewer.js
 import React, { useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
 import styled from 'styled-components';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, getDoc } from 'firebase/firestore';
+import { getFirestore } from 'firebase/firestore';
 
 // Firebase configuration - Replace with your config
 const firebaseConfig = {
@@ -21,7 +19,6 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 function ARViewer() {
-  const [searchParams] = useSearchParams();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -34,8 +31,8 @@ function ARViewer() {
           loadScript('https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js')
         ]);
 
-        // Setup AR scene after scripts are loaded
-        await setupARScene();
+        // Setup AR scene
+        setupARScene();
       } catch (err) {
         console.error('AR initialization error:', err);
         setError('Failed to load AR experience. Please check your internet connection.');
@@ -46,6 +43,7 @@ function ARViewer() {
 
     initAR();
 
+    // Cleanup function
     return () => {
       const scene = document.querySelector('a-scene');
       if (scene) {
@@ -64,39 +62,57 @@ function ARViewer() {
     });
   };
 
-  const setupARScene = async () => {
+  const setupARScene = () => {
     const scene = document.createElement('a-scene');
     scene.setAttribute('embedded', '');
     scene.setAttribute('arjs', 'sourceType: webcam; debugUIEnabled: false; detectionMode: mono_and_matrix;');
     scene.setAttribute('vr-mode-ui', 'enabled: false');
     scene.setAttribute('renderer', 'logarithmicDepthBuffer: true; precision: medium;');
 
-    // Create assets container
+    // Create assets
     const assets = document.createElement('a-assets');
+    const video = document.createElement('video');
+    video.id = 'ar-video';
+    video.setAttribute('preload', 'auto');
+    video.setAttribute('response-type', 'arraybuffer');
+    video.setAttribute('crossorigin', 'anonymous');
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
+    video.setAttribute('loop', 'true');
+    assets.appendChild(video);
     scene.appendChild(assets);
 
     // Create marker
     const marker = document.createElement('a-marker');
     marker.setAttribute('preset', 'custom');
     marker.setAttribute('type', 'pattern');
-    marker.id = 'ar-marker';
+    marker.setAttribute('url', '');
+    marker.setAttribute('smooth', 'true');
+    marker.setAttribute('smoothCount', '5');
+
+    // Create video entity
+    const videoEntity = document.createElement('a-video');
+    videoEntity.setAttribute('src', '#ar-video');
+    videoEntity.setAttribute('position', '0 0 0');
+    videoEntity.setAttribute('rotation', '-90 0 0');
+    videoEntity.setAttribute('width', '2');
+    videoEntity.setAttribute('height', '1.5');
+    marker.appendChild(videoEntity);
 
     // Handle marker detection
-    marker.addEventListener('markerFound', async () => {
-      try {
-        // Query Firestore for AR experiences
-        const experiencesRef = collection(db, 'arExperiences');
-        const q = query(experiencesRef, where('status', '==', 'active'));
-        const querySnapshot = await getDocs(q);
+    marker.addEventListener('markerFound', () => {
+      video.play().catch(console.error);
+      const instructions = document.querySelector('.instructions');
+      if (instructions) {
+        instructions.style.display = 'none';
+      }
+    });
 
-        if (!querySnapshot.empty) {
-          const experienceData = querySnapshot.docs[0].data();
-          setupVideo(experienceData.videoUrl, marker, assets);
-        } else {
-          console.log('No active AR experiences found');
-        }
-      } catch (error) {
-        console.error('Error fetching AR experience:', error);
+    marker.addEventListener('markerLost', () => {
+      video.pause();
+      const instructions = document.querySelector('.instructions');
+      if (instructions) {
+        instructions.style.display = 'block';
       }
     });
 
@@ -108,31 +124,6 @@ function ARViewer() {
 
     // Add scene to document
     document.body.appendChild(scene);
-  };
-
-  const setupVideo = (videoUrl, marker, assets) => {
-    // Create video element
-    const video = document.createElement('video');
-    video.id = 'ar-video';
-    video.src = videoUrl;
-    video.setAttribute('preload', 'auto');
-    video.setAttribute('crossorigin', 'anonymous');
-    video.setAttribute('playsinline', '');
-    video.setAttribute('webkit-playsinline', '');
-    video.setAttribute('loop', 'true');
-    assets.appendChild(video);
-
-    // Create video entity
-    const videoEntity = document.createElement('a-video');
-    videoEntity.setAttribute('src', '#ar-video');
-    videoEntity.setAttribute('position', '0 0 0');
-    videoEntity.setAttribute('rotation', '-90 0 0');
-    videoEntity.setAttribute('width', '2');
-    videoEntity.setAttribute('height', '1.5');
-    marker.appendChild(videoEntity);
-
-    // Play video
-    video.play().catch(console.error);
   };
 
   if (loading) {
@@ -152,12 +143,14 @@ function ARViewer() {
 
   return (
     <Container>
-      <Instructions>Point your camera at the marker to view AR content</Instructions>
+      <Instructions className="instructions">
+        Point your camera at the marker to view AR content
+      </Instructions>
     </Container>
   );
 }
 
-// Styled Components
+// Styled components
 const Container = styled.div`
   width: 100vw;
   height: 100vh;
