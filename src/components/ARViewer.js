@@ -43,20 +43,21 @@ const ARViewer = () => {
 
   const setupAREnvironment = async () => {
     try {
-      // First get AR data from Firebase
+      // Get AR data from Firebase
       const querySnapshot = await getDocs(collection(db, 'arExperiences'));
       if (querySnapshot.empty) {
         throw new Error('No AR experiences found');
       }
 
-      // Get the most recent AR experience
       const arExperience = querySnapshot.docs[0].data();
 
       // Create AR Scene
       const scene = document.createElement('a-scene');
       scene.setAttribute('embedded', '');
-      scene.setAttribute('arjs', 'sourceType: webcam; debugUIEnabled: false;');
+      scene.setAttribute('arjs', 'sourceType: webcam; debugUIEnabled: false; trackingMethod: best;');
       scene.setAttribute('vr-mode-ui', 'enabled: false');
+      scene.setAttribute('renderer', 'antialias: true; alpha: true');
+      scene.style.zIndex = '0';
 
       // Create assets
       const assets = document.createElement('a-assets');
@@ -66,6 +67,8 @@ const ARViewer = () => {
       video.setAttribute('preload', 'auto');
       video.setAttribute('playsinline', '');
       video.setAttribute('webkit-playsinline', '');
+      video.setAttribute('crossorigin', 'anonymous');
+      video.muted = true;
       assets.appendChild(video);
       scene.appendChild(assets);
 
@@ -74,6 +77,8 @@ const ARViewer = () => {
       marker.setAttribute('preset', 'custom');
       marker.setAttribute('type', 'pattern');
       marker.setAttribute('url', arExperience.markerUrl);
+      marker.setAttribute('smooth', 'true');
+      marker.setAttribute('smoothCount', '5');
 
       // Create video entity
       const videoEntity = document.createElement('a-video');
@@ -86,6 +91,7 @@ const ARViewer = () => {
 
       // Handle marker detection
       marker.addEventListener('markerFound', () => {
+        video.muted = false;
         video.play().catch(console.error);
         const instructions = document.querySelector('.instructions');
         if (instructions) instructions.style.display = 'none';
@@ -93,14 +99,15 @@ const ARViewer = () => {
 
       marker.addEventListener('markerLost', () => {
         video.pause();
+        video.muted = true;
         const instructions = document.querySelector('.instructions');
         if (instructions) instructions.style.display = 'block';
       });
 
-      // Add camera and marker to scene
-      scene.appendChild(marker);
+      // Add camera
       const camera = document.createElement('a-entity');
       camera.setAttribute('camera', '');
+      scene.appendChild(marker);
       scene.appendChild(camera);
 
       // Add scene to document
@@ -118,7 +125,7 @@ const ARViewer = () => {
     const initAR = async () => {
       try {
         await loadARScripts();
-        // Wait a bit for scripts to initialize
+        // Wait for scripts to initialize
         setTimeout(() => {
           setupAREnvironment();
         }, 1000);
@@ -164,11 +171,24 @@ const ARViewer = () => {
 
 // Styled Components
 const Container = styled.div`
-  width: 100vw;
-  height: 100vh;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
   overflow: hidden;
-  position: relative;
-  background-color: #000;
+  z-index: 1;
+
+  & > div {
+    z-index: 1;
+  }
+
+  .a-canvas {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    z-index: 0 !important;
+  }
 `;
 
 const Instructions = styled.div`
@@ -182,9 +202,10 @@ const Instructions = styled.div`
   border-radius: 25px;
   font-size: 16px;
   text-align: center;
-  z-index: 100;
+  z-index: 2;
   width: 80%;
   max-width: 400px;
+  pointer-events: none;
 `;
 
 const LoadingScreen = styled.div`
@@ -193,12 +214,13 @@ const LoadingScreen = styled.div`
   left: 0;
   width: 100%;
   height: 100%;
-  background: rgba(0, 0, 0, 0.9);
+  background: rgba(0, 0, 0, 0.8);
   color: white;
   display: flex;
   justify-content: center;
   align-items: center;
   font-size: 20px;
+  z-index: 999;
 `;
 
 const ErrorContainer = styled.div`
@@ -206,11 +228,12 @@ const ErrorContainer = styled.div`
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: rgba(0, 0, 0, 0.9);
+  background: rgba(0, 0, 0, 0.8);
   padding: 20px;
   border-radius: 10px;
   text-align: center;
   color: white;
+  z-index: 999;
 `;
 
 const ErrorText = styled.div`
