@@ -5,7 +5,7 @@ import { getFirestore } from 'firebase/firestore';
 
 // Firebase configuration - Replace with your config
 const firebaseConfig = {
- apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
+  apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
   projectId: "app-1238f",
   storageBucket: "app-1238f.appspot.com",
@@ -18,7 +18,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-function ARViewer() {
+const ARViewer = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -102,18 +102,12 @@ function ARViewer() {
     // Handle marker detection
     marker.addEventListener('markerFound', () => {
       video.play().catch(console.error);
-      const instructions = document.querySelector('.instructions');
-      if (instructions) {
-        instructions.style.display = 'none';
-      }
+      showInstructions(false);
     });
 
     marker.addEventListener('markerLost', () => {
       video.pause();
-      const instructions = document.querySelector('.instructions');
-      if (instructions) {
-        instructions.style.display = 'block';
-      }
+      showInstructions(true);
     });
 
     // Add camera
@@ -124,6 +118,13 @@ function ARViewer() {
 
     // Add scene to document
     document.body.appendChild(scene);
+  };
+
+  const showInstructions = (show) => {
+    const instructions = document.querySelector('.instructions');
+    if (instructions) {
+      instructions.style.display = show ? 'block' : 'none';
+    }
   };
 
   if (loading) {
@@ -148,7 +149,7 @@ function ARViewer() {
       </Instructions>
     </Container>
   );
-}
+};
 
 // Styled components
 const Container = styled.div`
