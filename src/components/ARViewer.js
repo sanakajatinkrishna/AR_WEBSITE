@@ -1,9 +1,10 @@
+// components/ARViewer.js
 import React, { useEffect, useState } from 'react';
 import styled from 'styled-components';
 import { initializeApp } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
+import { getFirestore, collection, getDocs } from 'firebase/firestore';
 
-// Firebase configuration - Replace with your config
+// Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -22,110 +23,120 @@ const ARViewer = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  const loadARScripts = async () => {
+    const scripts = [
+      'https://aframe.io/releases/1.2.0/aframe.min.js',
+      'https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js'
+    ];
+
+    for (const url of scripts) {
+      const script = document.createElement('script');
+      script.src = url;
+      script.async = true;
+      document.head.appendChild(script);
+      await new Promise((resolve, reject) => {
+        script.onload = resolve;
+        script.onerror = () => reject(new Error(`Failed to load ${url}`));
+      });
+    }
+  };
+
+  const setupAREnvironment = async () => {
+    try {
+      // First get AR data from Firebase
+      const querySnapshot = await getDocs(collection(db, 'arExperiences'));
+      if (querySnapshot.empty) {
+        throw new Error('No AR experiences found');
+      }
+
+      // Get the most recent AR experience
+      const arExperience = querySnapshot.docs[0].data();
+
+      // Create AR Scene
+      const scene = document.createElement('a-scene');
+      scene.setAttribute('embedded', '');
+      scene.setAttribute('arjs', 'sourceType: webcam; debugUIEnabled: false;');
+      scene.setAttribute('vr-mode-ui', 'enabled: false');
+
+      // Create assets
+      const assets = document.createElement('a-assets');
+      const video = document.createElement('video');
+      video.id = 'video';
+      video.src = arExperience.videoUrl;
+      video.setAttribute('preload', 'auto');
+      video.setAttribute('playsinline', '');
+      video.setAttribute('webkit-playsinline', '');
+      assets.appendChild(video);
+      scene.appendChild(assets);
+
+      // Create marker
+      const marker = document.createElement('a-marker');
+      marker.setAttribute('preset', 'custom');
+      marker.setAttribute('type', 'pattern');
+      marker.setAttribute('url', arExperience.markerUrl);
+
+      // Create video entity
+      const videoEntity = document.createElement('a-video');
+      videoEntity.setAttribute('src', '#video');
+      videoEntity.setAttribute('position', '0 0 0');
+      videoEntity.setAttribute('rotation', '-90 0 0');
+      videoEntity.setAttribute('width', '2');
+      videoEntity.setAttribute('height', '1.5');
+      marker.appendChild(videoEntity);
+
+      // Handle marker detection
+      marker.addEventListener('markerFound', () => {
+        video.play().catch(console.error);
+        const instructions = document.querySelector('.instructions');
+        if (instructions) instructions.style.display = 'none';
+      });
+
+      marker.addEventListener('markerLost', () => {
+        video.pause();
+        const instructions = document.querySelector('.instructions');
+        if (instructions) instructions.style.display = 'block';
+      });
+
+      // Add camera and marker to scene
+      scene.appendChild(marker);
+      const camera = document.createElement('a-entity');
+      camera.setAttribute('camera', '');
+      scene.appendChild(camera);
+
+      // Add scene to document
+      document.body.appendChild(scene);
+
+    } catch (error) {
+      console.error('Error setting up AR:', error);
+      setError('Failed to load AR experience. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     const initAR = async () => {
       try {
-        // Load AR.js and A-Frame scripts
-        await Promise.all([
-          loadScript('https://aframe.io/releases/1.2.0/aframe.min.js'),
-          loadScript('https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js')
-        ]);
-
-        // Setup AR scene
-        setupARScene();
-      } catch (err) {
-        console.error('AR initialization error:', err);
-        setError('Failed to load AR experience. Please check your internet connection.');
-      } finally {
+        await loadARScripts();
+        // Wait a bit for scripts to initialize
+        setTimeout(() => {
+          setupAREnvironment();
+        }, 1000);
+      } catch (error) {
+        console.error('Failed to initialize AR:', error);
+        setError('Failed to load AR components. Please check your connection.');
         setLoading(false);
       }
     };
 
     initAR();
 
-    // Cleanup function
+    // Cleanup
     return () => {
       const scene = document.querySelector('a-scene');
-      if (scene) {
-        scene.parentNode.removeChild(scene);
-      }
+      if (scene) scene.parentNode.removeChild(scene);
     };
   }, []);
-
-  const loadScript = (url) => {
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = url;
-      script.onload = resolve;
-      script.onerror = () => reject(new Error(`Failed to load script: ${url}`));
-      document.head.appendChild(script);
-    });
-  };
-
-  const setupARScene = () => {
-    const scene = document.createElement('a-scene');
-    scene.setAttribute('embedded', '');
-    scene.setAttribute('arjs', 'sourceType: webcam; debugUIEnabled: false; detectionMode: mono_and_matrix;');
-    scene.setAttribute('vr-mode-ui', 'enabled: false');
-    scene.setAttribute('renderer', 'logarithmicDepthBuffer: true; precision: medium;');
-
-    // Create assets
-    const assets = document.createElement('a-assets');
-    const video = document.createElement('video');
-    video.id = 'ar-video';
-    video.setAttribute('preload', 'auto');
-    video.setAttribute('response-type', 'arraybuffer');
-    video.setAttribute('crossorigin', 'anonymous');
-    video.setAttribute('playsinline', '');
-    video.setAttribute('webkit-playsinline', '');
-    video.setAttribute('loop', 'true');
-    assets.appendChild(video);
-    scene.appendChild(assets);
-
-    // Create marker
-    const marker = document.createElement('a-marker');
-    marker.setAttribute('preset', 'custom');
-    marker.setAttribute('type', 'pattern');
-    marker.setAttribute('url', '');
-    marker.setAttribute('smooth', 'true');
-    marker.setAttribute('smoothCount', '5');
-
-    // Create video entity
-    const videoEntity = document.createElement('a-video');
-    videoEntity.setAttribute('src', '#ar-video');
-    videoEntity.setAttribute('position', '0 0 0');
-    videoEntity.setAttribute('rotation', '-90 0 0');
-    videoEntity.setAttribute('width', '2');
-    videoEntity.setAttribute('height', '1.5');
-    marker.appendChild(videoEntity);
-
-    // Handle marker detection
-    marker.addEventListener('markerFound', () => {
-      video.play().catch(console.error);
-      showInstructions(false);
-    });
-
-    marker.addEventListener('markerLost', () => {
-      video.pause();
-      showInstructions(true);
-    });
-
-    // Add camera
-    const camera = document.createElement('a-entity');
-    camera.setAttribute('camera', '');
-    scene.appendChild(marker);
-    scene.appendChild(camera);
-
-    // Add scene to document
-    document.body.appendChild(scene);
-  };
-
-  const showInstructions = (show) => {
-    const instructions = document.querySelector('.instructions');
-    if (instructions) {
-      instructions.style.display = show ? 'block' : 'none';
-    }
-  };
 
   if (loading) {
     return <LoadingScreen>Loading AR Experience...</LoadingScreen>;
@@ -151,7 +162,7 @@ const ARViewer = () => {
   );
 };
 
-// Styled components
+// Styled Components
 const Container = styled.div`
   width: 100vw;
   height: 100vh;
