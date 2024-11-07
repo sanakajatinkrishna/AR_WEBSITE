@@ -24,19 +24,18 @@ function ARViewer() {
   const [searchParams] = useSearchParams();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [scanning, setScanning] = useState(true);
 
   useEffect(() => {
     const initAR = async () => {
       try {
-        // Load AR scripts
+        // Load AR.js and A-Frame scripts
         await Promise.all([
           loadScript('https://aframe.io/releases/1.2.0/aframe.min.js'),
           loadScript('https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js')
         ]);
 
         // Setup AR scene after scripts are loaded
-        setupARScene();
+        await setupARScene();
       } catch (err) {
         console.error('AR initialization error:', err);
         setError('Failed to load AR experience. Please check your internet connection.');
@@ -65,78 +64,74 @@ function ARViewer() {
     });
   };
 
-  const setupARScene = () => {
+  const setupARScene = async () => {
     const scene = document.createElement('a-scene');
     scene.setAttribute('embedded', '');
     scene.setAttribute('arjs', 'sourceType: webcam; debugUIEnabled: false; detectionMode: mono_and_matrix;');
     scene.setAttribute('vr-mode-ui', 'enabled: false');
     scene.setAttribute('renderer', 'logarithmicDepthBuffer: true; precision: medium;');
 
-    // Create marker detector
+    // Create assets container
+    const assets = document.createElement('a-assets');
+    scene.appendChild(assets);
+
+    // Create marker
     const marker = document.createElement('a-marker');
-    marker.setAttribute('type', 'pattern');
     marker.setAttribute('preset', 'custom');
-    marker.setAttribute('url', ''); // Will be set when marker is detected
+    marker.setAttribute('type', 'pattern');
+    marker.id = 'ar-marker';
 
     // Handle marker detection
     marker.addEventListener('markerFound', async () => {
-      setScanning(false);
-      const pattern = marker.getAttribute('pattern');
-      
       try {
-        // Query Firestore for the experience with this pattern
+        // Query Firestore for AR experiences
         const experiencesRef = collection(db, 'arExperiences');
-        const q = query(experiencesRef, where('markerUrl', '==', pattern));
+        const q = query(experiencesRef, where('status', '==', 'active'));
         const querySnapshot = await getDocs(q);
 
         if (!querySnapshot.empty) {
           const experienceData = querySnapshot.docs[0].data();
-          setupVideo(experienceData.videoUrl, marker);
+          setupVideo(experienceData.videoUrl, marker, assets);
+        } else {
+          console.log('No active AR experiences found');
         }
       } catch (error) {
-        console.error('Error fetching experience:', error);
-        setError('Failed to load AR content');
+        console.error('Error fetching AR experience:', error);
       }
     });
 
-    marker.addEventListener('markerLost', () => {
-      setScanning(true);
-    });
-
+    // Add camera
     const camera = document.createElement('a-entity');
     camera.setAttribute('camera', '');
-    
     scene.appendChild(marker);
     scene.appendChild(camera);
+
+    // Add scene to document
     document.body.appendChild(scene);
   };
 
-  const setupVideo = (videoUrl, marker) => {
-    // Create video element if it doesn't exist
-    let video = document.querySelector('#ar-video');
-    if (!video) {
-      const assets = document.createElement('a-assets');
-      video = document.createElement('video');
-      video.id = 'ar-video';
-      video.setAttribute('preload', 'auto');
-      video.setAttribute('response-type', 'arraybuffer');
-      video.setAttribute('crossorigin', 'anonymous');
-      video.setAttribute('playsinline', '');
-      video.setAttribute('webkit-playsinline', '');
-      video.setAttribute('loop', 'true');
-      video.src = videoUrl;
-      assets.appendChild(video);
-      marker.parentNode.appendChild(assets);
+  const setupVideo = (videoUrl, marker, assets) => {
+    // Create video element
+    const video = document.createElement('video');
+    video.id = 'ar-video';
+    video.src = videoUrl;
+    video.setAttribute('preload', 'auto');
+    video.setAttribute('crossorigin', 'anonymous');
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', '');
+    video.setAttribute('loop', 'true');
+    assets.appendChild(video);
 
-      const videoEntity = document.createElement('a-video');
-      videoEntity.setAttribute('src', '#ar-video');
-      videoEntity.setAttribute('position', '0 0 0');
-      videoEntity.setAttribute('rotation', '-90 0 0');
-      videoEntity.setAttribute('width', '2');
-      videoEntity.setAttribute('height', '1.5');
-      marker.appendChild(videoEntity);
-    }
+    // Create video entity
+    const videoEntity = document.createElement('a-video');
+    videoEntity.setAttribute('src', '#ar-video');
+    videoEntity.setAttribute('position', '0 0 0');
+    videoEntity.setAttribute('rotation', '-90 0 0');
+    videoEntity.setAttribute('width', '2');
+    videoEntity.setAttribute('height', '1.5');
+    marker.appendChild(videoEntity);
 
+    // Play video
     video.play().catch(console.error);
   };
 
@@ -148,22 +143,19 @@ function ARViewer() {
     return (
       <ErrorContainer>
         <ErrorText>{error}</ErrorText>
-        <RetryButton onClick={() => window.location.reload()}>Try Again</RetryButton>
+        <RetryButton onClick={() => window.location.reload()}>
+          Try Again
+        </RetryButton>
       </ErrorContainer>
     );
   }
 
   return (
     <Container>
-      {scanning && (
-        <Instructions>
-          Point your camera at the marker image to view AR content
-        </Instructions>
-      )}
+      <Instructions>Point your camera at the marker to view AR content</Instructions>
     </Container>
   );
 }
-
 
 // Styled Components
 const Container = styled.div`
@@ -199,17 +191,9 @@ const LoadingScreen = styled.div`
   background: rgba(0, 0, 0, 0.9);
   color: white;
   display: flex;
-  flex-direction: column;
   justify-content: center;
   align-items: center;
-  z-index: 1000;
-  text-align: center;
-  padding: 20px;
-`;
-
-const LoadingText = styled.div`
-  font-size: 18px;
-  margin: 10px;
+  font-size: 20px;
 `;
 
 const ErrorContainer = styled.div`
@@ -222,12 +206,9 @@ const ErrorContainer = styled.div`
   border-radius: 10px;
   text-align: center;
   color: white;
-  max-width: 80%;
-  width: 300px;
 `;
 
 const ErrorText = styled.div`
-  font-size: 16px;
   margin-bottom: 20px;
 `;
 
@@ -237,9 +218,9 @@ const RetryButton = styled.button`
   border: none;
   padding: 10px 20px;
   border-radius: 5px;
-  font-size: 16px;
   cursor: pointer;
-
+  font-size: 16px;
+  
   &:hover {
     background: #1976D2;
   }
