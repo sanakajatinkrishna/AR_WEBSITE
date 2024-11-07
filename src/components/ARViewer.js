@@ -24,7 +24,6 @@ function ARViewer() {
   const [searchParams] = useSearchParams();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [arData, setArData] = useState(null);
 
   useEffect(() => {
     const initAR = async () => {
@@ -52,7 +51,6 @@ function ARViewer() {
         }
 
         const data = docSnap.data();
-        setArData(data);
         setupARScene(data);
       } catch (err) {
         console.error('AR initialization error:', err);
@@ -65,7 +63,6 @@ function ARViewer() {
     initAR();
 
     return () => {
-      // Cleanup
       const scene = document.querySelector('a-scene');
       if (scene) {
         scene.parentNode.removeChild(scene);
@@ -175,8 +172,6 @@ function ARViewer() {
   );
 }
 
-export default ARViewer;
-
 // Styled Components
 const Container = styled.div`
   width: 100vw;
@@ -256,3 +251,5 @@ const RetryButton = styled.button`
     background: #1976D2;
   }
 `;
+
+export default ARViewer;
