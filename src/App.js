@@ -19,6 +19,7 @@ const db = getFirestore(app);
 const ARViewer = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const overlayCanvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const streamRef = useRef(null);
   const [hasPermission, setHasPermission] = useState(false);
@@ -26,43 +27,8 @@ const ARViewer = () => {
   const [matchedContent, setMatchedContent] = useState(null);
   const [arContent, setArContent] = useState([]);
   const [error, setError] = useState(null);
-  const [isCameraSupported, setIsCameraSupported] = useState(false);
+  const [matchedRegion, setMatchedRegion] = useState(null);
 
-  // Check camera support
-  useEffect(() => {
-    const checkCameraSupport = async () => {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        // Legacy support
-        if (navigator.getUserMedia) {
-          navigator.mediaDevices = {};
-          navigator.mediaDevices.getUserMedia = function(constraints) {
-            return new Promise((resolve, reject) => {
-              navigator.getUserMedia(constraints, resolve, reject);
-            });
-          };
-          setIsCameraSupported(true);
-        } else if (navigator.webkitGetUserMedia || navigator.mozGetUserMedia) {
-          navigator.mediaDevices = {};
-          navigator.mediaDevices.getUserMedia = function(constraints) {
-            const getUserMedia = navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
-            return new Promise((resolve, reject) => {
-              getUserMedia.call(navigator, constraints, resolve, reject);
-            });
-          };
-          setIsCameraSupported(true);
-        } else {
-          setError('Your browser does not support camera access. Please try using a modern browser like Chrome, Firefox, or Safari.');
-          setIsCameraSupported(false);
-        }
-      } else {
-        setIsCameraSupported(true);
-      }
-    };
-
-    checkCameraSupport();
-  }, []);
-
-  // Load AR content from Firebase
   useEffect(() => {
     const loadARContent = async () => {
       try {
@@ -80,13 +46,10 @@ const ARViewer = () => {
     loadARContent();
   }, []);
 
-  // Request camera permission and setup
   useEffect(() => {
     let mounted = true;
 
     const setupCamera = async () => {
-      if (!isCameraSupported) return;
-
       try {
         const constraints = {
           video: {
@@ -112,36 +75,13 @@ const ARViewer = () => {
         }
       } catch (err) {
         if (mounted) {
-          let errorMessage = 'Camera access error: ';
-          switch (err.name) {
-            case 'NotFoundError':
-            case 'DevicesNotFoundError':
-              errorMessage += 'No camera found.';
-              break;
-            case 'NotAllowedError':
-            case 'PermissionDeniedError':
-              errorMessage += 'Camera permission denied.';
-              break;
-            case 'NotReadableError':
-            case 'TrackStartError':
-              errorMessage += 'Camera is already in use.';
-              break;
-            case 'OverconstrainedError':
-            case 'ConstraintNotSatisfiedError':
-              errorMessage += 'Camera does not meet requirements.';
-              break;
-            default:
-              errorMessage += err.message || 'Unknown error occurred.';
-          }
-          setError(errorMessage);
+          setError('Camera access error: ' + (err.message || 'Unknown error'));
           setHasPermission(false);
         }
       }
     };
 
-    if (isCameraSupported) {
-      setupCamera();
-    }
+    setupCamera();
 
     return () => {
       mounted = false;
@@ -149,20 +89,68 @@ const ARViewer = () => {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
     };
-  }, [isCameraSupported]);
+  }, []);
 
-  // Image matching function using TensorFlow.js
+useEffect(() => {
+  const currentVideoRef = videoRef.current; // Store the current ref value
+  
+  const setupCanvas = () => {
+    if (canvasRef.current && currentVideoRef) {
+      canvasRef.current.width = currentVideoRef.videoWidth;
+      canvasRef.current.height = currentVideoRef.videoHeight;
+    }
+    if (overlayCanvasRef.current && currentVideoRef) {
+      overlayCanvasRef.current.width = currentVideoRef.videoWidth;
+      overlayCanvasRef.current.height = currentVideoRef.videoHeight;
+    }
+  };
+
+  if (currentVideoRef) {
+    currentVideoRef.addEventListener('loadedmetadata', setupCanvas);
+  }
+
+  return () => {
+    if (currentVideoRef) {
+      currentVideoRef.removeEventListener('loadedmetadata', setupCanvas);
+    }
+  };
+}, []);
+
+  const detectImageRegion = async (imageData) => {
+    try {
+      const detection = await window.tf.image.nonMaxSuppression(
+        // Convert image to tensor and detect features
+        await window.tf.browser.fromPixels(imageData),
+        0.5, // threshold
+        5 // max detections
+      );
+
+      if (detection.length > 0) {
+        // Get the bounding box of the detected region
+        const box = detection[0];
+        return {
+          x: box[0],
+          y: box[1],
+          width: box[2] - box[0],
+          height: box[3] - box[1]
+        };
+      }
+      return null;
+    } catch (error) {
+      console.error('Error detecting image region:', error);
+      return null;
+    }
+  };
+
   const matchImage = async (capturedImageData) => {
     if (!arContent.length) return false;
 
     try {
-      // Load and preprocess the captured image
       const tensor = await window.tf.browser.fromPixels(capturedImageData);
       const resized = window.tf.image.resizeBilinear(tensor, [224, 224]);
       const normalized = resized.div(255.0);
       const batched = normalized.expandDims(0);
 
-      // For each AR content, compare the captured image
       for (const content of arContent) {
         if (!content.imageUrl) continue;
 
@@ -182,15 +170,19 @@ const ARViewer = () => {
           const contentBatched = contentNormalized.expandDims(0);
 
           const similarity = await window.tf.metrics.cosineProximity(batched, contentBatched).data();
-          
+
           contentTensor.dispose();
           contentResized.dispose();
           contentNormalized.dispose();
           contentBatched.dispose();
 
           if (similarity[0] > 0.8) {
-            setMatchedContent(content);
-            return true;
+            const region = await detectImageRegion(capturedImageData);
+            if (region) {
+              setMatchedRegion(region);
+              setMatchedContent(content);
+              return true;
+            }
           }
         } catch (imgError) {
           console.error('Error processing image:', imgError);
@@ -210,17 +202,39 @@ const ARViewer = () => {
     }
   };
 
+  const renderOverlay = () => {
+    if (!matchedContent || !matchedRegion || !overlayCanvasRef.current || !overlayVideoRef.current) return;
+
+    const ctx = overlayCanvasRef.current.getContext('2d');
+    ctx.clearRect(0, 0, overlayCanvasRef.current.width, overlayCanvasRef.current.height);
+
+    // Draw the video only in the matched region
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(matchedRegion.x, matchedRegion.y, matchedRegion.width, matchedRegion.height);
+    ctx.clip();
+    ctx.drawImage(
+      overlayVideoRef.current,
+      matchedRegion.x,
+      matchedRegion.y,
+      matchedRegion.width,
+      matchedRegion.height
+    );
+    ctx.restore();
+  };
+
   const scanFrame = async () => {
     if (!canvasRef.current || !videoRef.current || !isScanning) return;
 
     const context = canvasRef.current.getContext('2d');
-    context.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
+    context.drawImage(videoRef.current, 0, 0);
     
     const matched = await matchImage(canvasRef.current);
     
     if (matched && overlayVideoRef.current) {
       overlayVideoRef.current.style.display = 'block';
-      overlayVideoRef.current.play().catch(console.error);
+      await overlayVideoRef.current.play().catch(console.error);
+      renderOverlay();
     }
 
     if (isScanning) {
@@ -250,11 +264,7 @@ const ARViewer = () => {
         )}
 
         <div className="relative w-full aspect-video bg-black rounded-lg overflow-hidden">
-          {!isCameraSupported ? (
-            <div className="flex items-center justify-center h-full">
-              <p className="text-white">Camera not supported in this browser</p>
-            </div>
-          ) : hasPermission ? (
+          {hasPermission ? (
             <>
               <video
                 ref={videoRef}
@@ -266,18 +276,19 @@ const ARViewer = () => {
               <canvas
                 ref={canvasRef}
                 className="hidden"
-                width="640"
-                height="480"
+              />
+              <canvas
+                ref={overlayCanvasRef}
+                className="absolute top-0 left-0 w-full h-full pointer-events-none"
               />
               {matchedContent && matchedContent.videoUrl && (
                 <video
                   ref={overlayVideoRef}
                   src={matchedContent.videoUrl}
-                  className="absolute top-0 left-0 w-full h-full object-cover"
+                  className="hidden"
                   playsInline
                   loop
                   muted
-                  style={{ display: 'none' }}
                 />
               )}
             </>
@@ -289,7 +300,7 @@ const ARViewer = () => {
         </div>
 
         <div className="mt-6 flex justify-center">
-          {isCameraSupported && hasPermission && (
+          {hasPermission && (
             <button
               onClick={toggleScanning}
               className={`px-6 py-3 rounded-lg font-semibold ${
