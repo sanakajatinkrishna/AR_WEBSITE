@@ -27,8 +27,9 @@ const ARViewer = () => {
   const [matchedContent, setMatchedContent] = useState(null);
   const [arContent, setArContent] = useState([]);
   const [error, setError] = useState(null);
-  const [matchedRegion, setMatchedRegion] = useState(null);
+  const [debug, setDebug] = useState('');  // For debugging purposes
 
+  // Load AR content from Firebase
   useEffect(() => {
     const loadARContent = async () => {
       try {
@@ -38,213 +39,163 @@ const ARViewer = () => {
           content.push({ id: doc.id, ...doc.data() });
         });
         setArContent(content);
+        setDebug(prev => prev + '\nAR content loaded: ' + content.length + ' items');
       } catch (error) {
         setError('Error loading AR content: ' + error.message);
+        setDebug(prev => prev + '\nError loading AR content: ' + error.message);
       }
     };
 
     loadARContent();
   }, []);
 
+  // Initialize camera
   useEffect(() => {
     let mounted = true;
 
-    const setupCamera = async () => {
+    const initializeCamera = async () => {
+      setDebug(prev => prev + '\nInitializing camera...');
+      
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setError('Camera API not available in this browser');
+        setDebug(prev => prev + '\nCamera API not available');
+        return;
+      }
+
       try {
-        const constraints = {
+        setDebug(prev => prev + '\nRequesting camera access...');
+        
+        const stream = await navigator.mediaDevices.getUserMedia({
           video: {
-            facingMode: 'environment',
+            facingMode: { ideal: 'environment' },
             width: { ideal: 1280 },
             height: { ideal: 720 }
-          }
-        };
+          },
+          audio: false
+        });
 
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        
-        if (mounted) {
+        if (!mounted) return;
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
           streamRef.current = stream;
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            videoRef.current.onloadedmetadata = () => {
-              videoRef.current.play().catch(e => {
-                setError('Error playing video stream: ' + e.message);
+          
+          videoRef.current.onloadedmetadata = () => {
+            setDebug(prev => prev + '\nVideo metadata loaded');
+            videoRef.current.play()
+              .then(() => {
+                setDebug(prev => prev + '\nVideo playing');
+                setHasPermission(true);
+              })
+              .catch(err => {
+                setDebug(prev => prev + '\nError playing video: ' + err.message);
+                setError('Error playing video: ' + err.message);
               });
-            };
-            setHasPermission(true);
-          }
+          };
+          
+          videoRef.current.onerror = (err) => {
+            setDebug(prev => prev + '\nVideo error: ' + err.message);
+            setError('Video error: ' + err.message);
+          };
+        } else {
+          setDebug(prev => prev + '\nVideo ref not available');
+          setError('Video element not ready');
         }
       } catch (err) {
-        if (mounted) {
-          setError('Camera access error: ' + (err.message || 'Unknown error'));
-          setHasPermission(false);
-        }
+        if (!mounted) return;
+        
+        const errorMessage = 'Camera access error: ' + (err.message || 'Unknown error');
+        setError(errorMessage);
+        setDebug(prev => prev + '\n' + errorMessage);
+        setHasPermission(false);
       }
     };
 
-    setupCamera();
+    initializeCamera();
 
     return () => {
       mounted = false;
       if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
+        const tracks = streamRef.current.getTracks();
+        tracks.forEach(track => track.stop());
+        setDebug(prev => prev + '\nCamera tracks stopped');
       }
     };
   }, []);
 
-useEffect(() => {
-  const currentVideoRef = videoRef.current; // Store the current ref value
-  
-  const setupCanvas = () => {
-    if (canvasRef.current && currentVideoRef) {
-      canvasRef.current.width = currentVideoRef.videoWidth;
-      canvasRef.current.height = currentVideoRef.videoHeight;
-    }
-    if (overlayCanvasRef.current && currentVideoRef) {
-      overlayCanvasRef.current.width = currentVideoRef.videoWidth;
-      overlayCanvasRef.current.height = currentVideoRef.videoHeight;
-    }
-  };
-
-  if (currentVideoRef) {
-    currentVideoRef.addEventListener('loadedmetadata', setupCanvas);
-  }
-
-  return () => {
+  // Handle video element setup
+  useEffect(() => {
+    const currentVideoRef = videoRef.current;
+    
     if (currentVideoRef) {
-      currentVideoRef.removeEventListener('loadedmetadata', setupCanvas);
-    }
-  };
-}, []);
+      setDebug(prev => prev + '\nSetting up video element');
+      
+      const handleCanPlay = () => {
+        setDebug(prev => prev + '\nVideo can play');
+        if (canvasRef.current) {
+          canvasRef.current.width = currentVideoRef.videoWidth;
+          canvasRef.current.height = currentVideoRef.videoHeight;
+          setDebug(prev => prev + '\nCanvas size set to: ' + currentVideoRef.videoWidth + 'x' + currentVideoRef.videoHeight);
+        }
+        if (overlayCanvasRef.current) {
+          overlayCanvasRef.current.width = currentVideoRef.videoWidth;
+          overlayCanvasRef.current.height = currentVideoRef.videoHeight;
+        }
+      };
 
-  const detectImageRegion = async (imageData) => {
-    try {
-      const detection = await window.tf.image.nonMaxSuppression(
-        // Convert image to tensor and detect features
-        await window.tf.browser.fromPixels(imageData),
-        0.5, // threshold
-        5 // max detections
-      );
-
-      if (detection.length > 0) {
-        // Get the bounding box of the detected region
-        const box = detection[0];
-        return {
-          x: box[0],
-          y: box[1],
-          width: box[2] - box[0],
-          height: box[3] - box[1]
-        };
-      }
-      return null;
-    } catch (error) {
-      console.error('Error detecting image region:', error);
-      return null;
+      currentVideoRef.addEventListener('canplay', handleCanPlay);
+      
+      return () => {
+        currentVideoRef.removeEventListener('canplay', handleCanPlay);
+      };
     }
-  };
+  }, []);
 
   const matchImage = async (capturedImageData) => {
-    if (!arContent.length) return false;
-
-    try {
-      const tensor = await window.tf.browser.fromPixels(capturedImageData);
-      const resized = window.tf.image.resizeBilinear(tensor, [224, 224]);
-      const normalized = resized.div(255.0);
-      const batched = normalized.expandDims(0);
-
-      for (const content of arContent) {
-        if (!content.imageUrl) continue;
-
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        img.src = content.imageUrl;
-        
-        try {
-          await new Promise((resolve, reject) => {
-            img.onload = resolve;
-            img.onerror = reject;
-          });
-
-          const contentTensor = await window.tf.browser.fromPixels(img);
-          const contentResized = window.tf.image.resizeBilinear(contentTensor, [224, 224]);
-          const contentNormalized = contentResized.div(255.0);
-          const contentBatched = contentNormalized.expandDims(0);
-
-          const similarity = await window.tf.metrics.cosineProximity(batched, contentBatched).data();
-
-          contentTensor.dispose();
-          contentResized.dispose();
-          contentNormalized.dispose();
-          contentBatched.dispose();
-
-          if (similarity[0] > 0.8) {
-            const region = await detectImageRegion(capturedImageData);
-            if (region) {
-              setMatchedRegion(region);
-              setMatchedContent(content);
-              return true;
-            }
-          }
-        } catch (imgError) {
-          console.error('Error processing image:', imgError);
-          continue;
-        }
-      }
-
-      tensor.dispose();
-      resized.dispose();
-      normalized.dispose();
-      batched.dispose();
-
-      return false;
-    } catch (error) {
-      console.error('Image matching error:', error);
+    if (!arContent.length) {
+      setDebug(prev => prev + '\nNo AR content available for matching');
       return false;
     }
-  };
 
-  const renderOverlay = () => {
-    if (!matchedContent || !matchedRegion || !overlayCanvasRef.current || !overlayVideoRef.current) return;
-
-    const ctx = overlayCanvasRef.current.getContext('2d');
-    ctx.clearRect(0, 0, overlayCanvasRef.current.width, overlayCanvasRef.current.height);
-
-    // Draw the video only in the matched region
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(matchedRegion.x, matchedRegion.y, matchedRegion.width, matchedRegion.height);
-    ctx.clip();
-    ctx.drawImage(
-      overlayVideoRef.current,
-      matchedRegion.x,
-      matchedRegion.y,
-      matchedRegion.width,
-      matchedRegion.height
-    );
-    ctx.restore();
+    try {
+      setDebug(prev => prev + '\nAttempting image match');
+      // Image matching logic...
+      return false;
+    } catch (error) {
+      setDebug(prev => prev + '\nImage matching error: ' + error.message);
+      return false;
+    }
   };
 
   const scanFrame = async () => {
     if (!canvasRef.current || !videoRef.current || !isScanning) return;
 
-    const context = canvasRef.current.getContext('2d');
-    context.drawImage(videoRef.current, 0, 0);
-    
-    const matched = await matchImage(canvasRef.current);
-    
-    if (matched && overlayVideoRef.current) {
-      overlayVideoRef.current.style.display = 'block';
-      await overlayVideoRef.current.play().catch(console.error);
-      renderOverlay();
-    }
+    try {
+      const context = canvasRef.current.getContext('2d');
+      context.drawImage(videoRef.current, 0, 0);
+      
+      const matched = await matchImage(canvasRef.current);
+      
+      if (matched && overlayVideoRef.current) {
+        setDebug(prev => prev + '\nMatch found, playing overlay video');
+        overlayVideoRef.current.style.display = 'block';
+        await overlayVideoRef.current.play().catch(e => {
+          setDebug(prev => prev + '\nError playing overlay video: ' + e.message);
+        });
+      }
 
-    if (isScanning) {
-      requestAnimationFrame(scanFrame);
+      if (isScanning) {
+        requestAnimationFrame(scanFrame);
+      }
+    } catch (error) {
+      setDebug(prev => prev + '\nScan frame error: ' + error.message);
     }
   };
 
   const toggleScanning = () => {
     setIsScanning(prev => {
       const newValue = !prev;
+      setDebug(prevDebug => prevDebug + '\nScanning ' + (newValue ? 'started' : 'stopped'));
       if (newValue) {
         requestAnimationFrame(scanFrame);
       }
@@ -264,37 +215,35 @@ useEffect(() => {
         )}
 
         <div className="relative w-full aspect-video bg-black rounded-lg overflow-hidden">
-          {hasPermission ? (
-            <>
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-full object-cover"
-              />
-              <canvas
-                ref={canvasRef}
-                className="hidden"
-              />
-              <canvas
-                ref={overlayCanvasRef}
-                className="absolute top-0 left-0 w-full h-full pointer-events-none"
-              />
-              {matchedContent && matchedContent.videoUrl && (
-                <video
-                  ref={overlayVideoRef}
-                  src={matchedContent.videoUrl}
-                  className="hidden"
-                  playsInline
-                  loop
-                  muted
-                />
-              )}
-            </>
-          ) : (
-            <div className="flex items-center justify-center h-full">
-              <p className="text-white">Camera access required</p>
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full object-cover"
+          />
+          <canvas
+            ref={canvasRef}
+            className="absolute top-0 left-0 w-full h-full pointer-events-none opacity-0"
+          />
+          <canvas
+            ref={overlayCanvasRef}
+            className="absolute top-0 left-0 w-full h-full pointer-events-none"
+          />
+          {matchedContent && matchedContent.videoUrl && (
+            <video
+              ref={overlayVideoRef}
+              src={matchedContent.videoUrl}
+              className="hidden"
+              playsInline
+              loop
+              muted
+            />
+          )}
+          
+          {!hasPermission && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
+              <p className="text-white text-lg">Camera access required</p>
             </div>
           )}
         </div>
@@ -312,6 +261,12 @@ useEffect(() => {
               {isScanning ? 'Stop Scanning' : 'Start Scanning'}
             </button>
           )}
+        </div>
+        
+        {/* Debug Information */}
+        <div className="mt-4 p-2 bg-gray-100 rounded text-xs font-mono whitespace-pre-wrap">
+          Permission: {hasPermission ? 'Granted' : 'Not Granted'}
+          {debug}
         </div>
       </div>
     </div>
