@@ -2,7 +2,6 @@ import React, { useState, useRef, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, getDocs } from 'firebase/firestore';
 
-// Initialize Firebase with your config
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -19,17 +18,15 @@ const db = getFirestore(app);
 const ARViewer = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const overlayCanvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const streamRef = useRef(null);
   const [hasPermission, setHasPermission] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
-  const [matchedContent, setMatchedContent] = useState(null);
   const [arContent, setArContent] = useState([]);
   const [error, setError] = useState(null);
-  const [debug, setDebug] = useState('');  // For debugging purposes
+  const [debug, setDebug] = useState('');
+  const [currentMatch, setCurrentMatch] = useState(null);
 
-  // Load AR content from Firebase
   useEffect(() => {
     const loadARContent = async () => {
       try {
@@ -49,7 +46,6 @@ const ARViewer = () => {
     loadARContent();
   }, []);
 
-  // Initialize camera
   useEffect(() => {
     let mounted = true;
 
@@ -123,7 +119,6 @@ const ARViewer = () => {
     };
   }, []);
 
-  // Handle video element setup
   useEffect(() => {
     const currentVideoRef = videoRef.current;
     
@@ -137,10 +132,6 @@ const ARViewer = () => {
           canvasRef.current.height = currentVideoRef.videoHeight;
           setDebug(prev => prev + '\nCanvas size set to: ' + currentVideoRef.videoWidth + 'x' + currentVideoRef.videoHeight);
         }
-        if (overlayCanvasRef.current) {
-          overlayCanvasRef.current.width = currentVideoRef.videoWidth;
-          overlayCanvasRef.current.height = currentVideoRef.videoHeight;
-        }
       };
 
       currentVideoRef.addEventListener('canplay', handleCanPlay);
@@ -151,6 +142,37 @@ const ARViewer = () => {
     }
   }, []);
 
+  const compareImages = async (capturedImage, referenceImage) => {
+    try {
+      const capturedTensor = await window.tf.browser.fromPixels(capturedImage);
+      const referenceTensor = await window.tf.browser.fromPixels(referenceImage);
+      
+      const resizedCaptured = window.tf.image.resizeBilinear(capturedTensor, [224, 224]);
+      const resizedReference = window.tf.image.resizeBilinear(referenceTensor, [224, 224]);
+      
+      const normalizedCaptured = resizedCaptured.div(255.0);
+      const normalizedReference = resizedReference.div(255.0);
+      
+      const similarity = window.tf.metrics.cosineProximity(
+        normalizedCaptured.reshapeAs([1, -1]),
+        normalizedReference.reshapeAs([1, -1])
+      ).dataSync()[0];
+
+      // Cleanup
+      capturedTensor.dispose();
+      referenceTensor.dispose();
+      resizedCaptured.dispose();
+      resizedReference.dispose();
+      normalizedCaptured.dispose();
+      normalizedReference.dispose();
+
+      return similarity;
+    } catch (error) {
+      console.error('Error comparing images:', error);
+      return 0;
+    }
+  };
+
   const matchImage = async (capturedImageData) => {
     if (!arContent.length) {
       setDebug(prev => prev + '\nNo AR content available for matching');
@@ -159,10 +181,33 @@ const ARViewer = () => {
 
     try {
       setDebug(prev => prev + '\nAttempting image match');
-      // Image matching logic...
+      
+      for (const content of arContent) {
+        if (!content.imageUrl) continue;
+
+        const referenceImage = new Image();
+        referenceImage.crossOrigin = "anonymous";
+        referenceImage.src = content.imageUrl;
+
+        await new Promise((resolve, reject) => {
+          referenceImage.onload = resolve;
+          referenceImage.onerror = reject;
+        });
+
+        const similarity = await compareImages(capturedImageData, referenceImage);
+        
+        if (similarity > 0.8) { // Threshold for matching
+          setDebug(prev => prev + '\nMatch found! Similarity: ' + similarity);
+          setCurrentMatch(content);
+          return true;
+        }
+      }
+
+      setCurrentMatch(null);
       return false;
     } catch (error) {
       setDebug(prev => prev + '\nImage matching error: ' + error.message);
+      setCurrentMatch(null);
       return false;
     }
   };
@@ -174,13 +219,13 @@ const ARViewer = () => {
       const context = canvasRef.current.getContext('2d');
       context.drawImage(videoRef.current, 0, 0);
       
-      const matched = await matchImage(canvasRef.current);
+      await matchImage(canvasRef.current);
       
-      if (matched && overlayVideoRef.current) {
-        setDebug(prev => prev + '\nMatch found, playing overlay video');
+      if (currentMatch && overlayVideoRef.current && overlayVideoRef.current.paused) {
+        setDebug(prev => prev + '\nPlaying matched video');
         overlayVideoRef.current.style.display = 'block';
         await overlayVideoRef.current.play().catch(e => {
-          setDebug(prev => prev + '\nError playing overlay video: ' + e.message);
+          setDebug(prev => prev + '\nError playing video: ' + e.message);
         });
       }
 
@@ -226,15 +271,11 @@ const ARViewer = () => {
             ref={canvasRef}
             className="absolute top-0 left-0 w-full h-full pointer-events-none opacity-0"
           />
-          <canvas
-            ref={overlayCanvasRef}
-            className="absolute top-0 left-0 w-full h-full pointer-events-none"
-          />
-          {matchedContent && matchedContent.videoUrl && (
+          {currentMatch && currentMatch.videoUrl && (
             <video
               ref={overlayVideoRef}
-              src={matchedContent.videoUrl}
-              className="hidden"
+              src={currentMatch.videoUrl}
+              className="absolute top-0 left-0 w-full h-full object-cover"
               playsInline
               loop
               muted
