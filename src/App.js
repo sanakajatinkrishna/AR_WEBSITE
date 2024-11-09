@@ -1,7 +1,8 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, getDocs } from 'firebase/firestore';
 
+// Firebase config
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -20,13 +21,161 @@ const ARViewer = () => {
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const streamRef = useRef(null);
+  const animationFrameRef = useRef(null);
+  
   const [hasPermission, setHasPermission] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [arContent, setArContent] = useState([]);
   const [error, setError] = useState(null);
   const [debug, setDebug] = useState('');
   const [currentMatch, setCurrentMatch] = useState(null);
+  const [isProcessingFrame, setIsProcessingFrame] = useState(false);
+  const [matchStatus, setMatchStatus] = useState('');
 
+  const addDebug = useCallback((message) => {
+    console.log(message); // For immediate feedback in console
+    setDebug(prev => `${message}\n${prev}`.slice(0, 1000)); // Keep last 1000 chars
+  }, []);
+
+  // Process a single frame from the video
+  const processFrame = useCallback(async () => {
+    if (!canvasRef.current || !videoRef.current) return;
+
+    const context = canvasRef.current.getContext('2d');
+    // Flip canvas horizontally for front camera if needed
+    context.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
+    
+    // Get frame data for processing
+    const frameData = context.getImageData(0, 0, canvasRef.current.width, canvasRef.current.height);
+    return frameData;
+  }, []);
+
+  // Compare current frame with reference image
+  const compareWithReference = useCallback(async (frameData, referenceImage) => {
+    try {
+      // Convert frame to tensor
+      const frameTensor = window.tf.browser.fromPixels(frameData);
+      const resizedFrame = window.tf.image.resizeBilinear(frameTensor, [224, 224]);
+      const normalizedFrame = resizedFrame.div(255.0);
+
+      // Convert reference image to tensor
+      const refTensor = window.tf.browser.fromPixels(referenceImage);
+      const resizedRef = window.tf.image.resizeBilinear(refTensor, [224, 224]);
+      const normalizedRef = resizedRef.div(255.0);
+
+      // Calculate similarity score
+      const frameFeatures = normalizedFrame.reshape([1, -1]);
+      const refFeatures = normalizedRef.reshape([1, -1]);
+      
+      const similarity = window.tf.metrics.cosineProximity(frameFeatures, refFeatures).dataSync()[0];
+
+      // Cleanup tensors
+      [frameTensor, resizedFrame, normalizedFrame, refTensor, resizedRef, normalizedRef, frameFeatures, refFeatures]
+        .forEach(tensor => tensor.dispose());
+
+      return similarity;
+    } catch (error) {
+      addDebug(`Error comparing images: ${error.message}`);
+      return 0;
+    }
+  }, [addDebug]);
+
+  // Main scanning function
+  const scanFrame = useCallback(async () => {
+    if (!isScanning || isProcessingFrame) return;
+    
+    try {
+      setIsProcessingFrame(true);
+      const frameData = await processFrame();
+      
+      if (!frameData) {
+        addDebug('No frame data available');
+        return;
+      }
+
+      // Check each AR content item
+      for (const content of arContent) {
+        if (!content.imageUrl) continue;
+
+        // Load reference image
+        const referenceImage = new Image();
+        referenceImage.crossOrigin = 'anonymous';
+        
+        try {
+          // Load image and wait for it
+          await new Promise((resolve, reject) => {
+            referenceImage.onload = resolve;
+            referenceImage.onerror = reject;
+            referenceImage.src = content.imageUrl;
+          });
+
+          const similarity = await compareWithReference(frameData, referenceImage);
+          
+          // Update match status for debugging
+          setMatchStatus(`Similarity: ${similarity.toFixed(3)}`);
+
+          // If we have a good match
+          if (similarity > 0.7) { // Adjust threshold as needed
+            addDebug(`Match found! Similarity: ${similarity.toFixed(3)}`);
+            setCurrentMatch(content);
+            
+            // Play the video
+            if (overlayVideoRef.current && overlayVideoRef.current.paused) {
+              overlayVideoRef.current.style.display = 'block';
+              await overlayVideoRef.current.play();
+              addDebug('Playing video overlay');
+            }
+            return; // Stop checking other content once we find a match
+          }
+        } catch (error) {
+          addDebug(`Error processing reference image: ${error.message}`);
+          continue;
+        }
+      }
+
+      // If we get here, no match was found
+      if (currentMatch) {
+        setCurrentMatch(null);
+        if (overlayVideoRef.current) {
+          overlayVideoRef.current.pause();
+          overlayVideoRef.current.style.display = 'none';
+        }
+      }
+
+    } catch (error) {
+      addDebug(`Scan error: ${error.message}`);
+    } finally {
+      setIsProcessingFrame(false);
+      // Continue scanning
+      if (isScanning) {
+        animationFrameRef.current = requestAnimationFrame(scanFrame);
+      }
+    }
+  }, [isScanning, isProcessingFrame, arContent, processFrame, compareWithReference, currentMatch, addDebug]);
+
+  // Effect for scanning
+  useEffect(() => {
+    if (isScanning) {
+      scanFrame();
+    } else {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      setCurrentMatch(null);
+      if (overlayVideoRef.current) {
+        overlayVideoRef.current.pause();
+        overlayVideoRef.current.style.display = 'none';
+      }
+    }
+
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [isScanning, scanFrame]);
+
+  // Load AR content
   useEffect(() => {
     const loadARContent = async () => {
       try {
@@ -36,217 +185,46 @@ const ARViewer = () => {
           content.push({ id: doc.id, ...doc.data() });
         });
         setArContent(content);
-        setDebug(prev => prev + '\nAR content loaded: ' + content.length + ' items');
+        addDebug(`Loaded ${content.length} AR content items`);
       } catch (error) {
-        setError('Error loading AR content: ' + error.message);
-        setDebug(prev => prev + '\nError loading AR content: ' + error.message);
+        setError(`Failed to load AR content: ${error.message}`);
+        addDebug(`AR content load error: ${error.message}`);
       }
     };
 
     loadARContent();
-  }, []);
+  }, [addDebug]);
 
+  // Initialize camera
   useEffect(() => {
-    let mounted = true;
-
-    const initializeCamera = async () => {
-      setDebug(prev => prev + '\nInitializing camera...');
-      
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setError('Camera API not available in this browser');
-        setDebug(prev => prev + '\nCamera API not available');
-        return;
-      }
-
+    const initCamera = async () => {
       try {
-        setDebug(prev => prev + '\nRequesting camera access...');
-        
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: 'environment' },
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          },
-          audio: false
+          video: { facingMode: 'environment' }
         });
-
-        if (!mounted) return;
-
+        
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           streamRef.current = stream;
-          
-          videoRef.current.onloadedmetadata = () => {
-            setDebug(prev => prev + '\nVideo metadata loaded');
-            videoRef.current.play()
-              .then(() => {
-                setDebug(prev => prev + '\nVideo playing');
-                setHasPermission(true);
-              })
-              .catch(err => {
-                setDebug(prev => prev + '\nError playing video: ' + err.message);
-                setError('Error playing video: ' + err.message);
-              });
-          };
-          
-          videoRef.current.onerror = (err) => {
-            setDebug(prev => prev + '\nVideo error: ' + err.message);
-            setError('Video error: ' + err.message);
-          };
-        } else {
-          setDebug(prev => prev + '\nVideo ref not available');
-          setError('Video element not ready');
+          await videoRef.current.play();
+          setHasPermission(true);
+          addDebug('Camera initialized');
         }
       } catch (err) {
-        if (!mounted) return;
-        
-        const errorMessage = 'Camera access error: ' + (err.message || 'Unknown error');
-        setError(errorMessage);
-        setDebug(prev => prev + '\n' + errorMessage);
+        setError(`Camera access error: ${err.message}`);
+        addDebug(`Camera error: ${err.message}`);
         setHasPermission(false);
       }
     };
 
-    initializeCamera();
+    initCamera();
 
     return () => {
-      mounted = false;
       if (streamRef.current) {
-        const tracks = streamRef.current.getTracks();
-        tracks.forEach(track => track.stop());
-        setDebug(prev => prev + '\nCamera tracks stopped');
+        streamRef.current.getTracks().forEach(track => track.stop());
       }
     };
-  }, []);
-
-  useEffect(() => {
-    const currentVideoRef = videoRef.current;
-    
-    if (currentVideoRef) {
-      setDebug(prev => prev + '\nSetting up video element');
-      
-      const handleCanPlay = () => {
-        setDebug(prev => prev + '\nVideo can play');
-        if (canvasRef.current) {
-          canvasRef.current.width = currentVideoRef.videoWidth;
-          canvasRef.current.height = currentVideoRef.videoHeight;
-          setDebug(prev => prev + '\nCanvas size set to: ' + currentVideoRef.videoWidth + 'x' + currentVideoRef.videoHeight);
-        }
-      };
-
-      currentVideoRef.addEventListener('canplay', handleCanPlay);
-      
-      return () => {
-        currentVideoRef.removeEventListener('canplay', handleCanPlay);
-      };
-    }
-  }, []);
-
-  const compareImages = async (capturedImage, referenceImage) => {
-    try {
-      const capturedTensor = await window.tf.browser.fromPixels(capturedImage);
-      const referenceTensor = await window.tf.browser.fromPixels(referenceImage);
-      
-      const resizedCaptured = window.tf.image.resizeBilinear(capturedTensor, [224, 224]);
-      const resizedReference = window.tf.image.resizeBilinear(referenceTensor, [224, 224]);
-      
-      const normalizedCaptured = resizedCaptured.div(255.0);
-      const normalizedReference = resizedReference.div(255.0);
-      
-      const similarity = window.tf.metrics.cosineProximity(
-        normalizedCaptured.reshapeAs([1, -1]),
-        normalizedReference.reshapeAs([1, -1])
-      ).dataSync()[0];
-
-      // Cleanup
-      capturedTensor.dispose();
-      referenceTensor.dispose();
-      resizedCaptured.dispose();
-      resizedReference.dispose();
-      normalizedCaptured.dispose();
-      normalizedReference.dispose();
-
-      return similarity;
-    } catch (error) {
-      console.error('Error comparing images:', error);
-      return 0;
-    }
-  };
-
-  const matchImage = async (capturedImageData) => {
-    if (!arContent.length) {
-      setDebug(prev => prev + '\nNo AR content available for matching');
-      return false;
-    }
-
-    try {
-      setDebug(prev => prev + '\nAttempting image match');
-      
-      for (const content of arContent) {
-        if (!content.imageUrl) continue;
-
-        const referenceImage = new Image();
-        referenceImage.crossOrigin = "anonymous";
-        referenceImage.src = content.imageUrl;
-
-        await new Promise((resolve, reject) => {
-          referenceImage.onload = resolve;
-          referenceImage.onerror = reject;
-        });
-
-        const similarity = await compareImages(capturedImageData, referenceImage);
-        
-        if (similarity > 0.8) { // Threshold for matching
-          setDebug(prev => prev + '\nMatch found! Similarity: ' + similarity);
-          setCurrentMatch(content);
-          return true;
-        }
-      }
-
-      setCurrentMatch(null);
-      return false;
-    } catch (error) {
-      setDebug(prev => prev + '\nImage matching error: ' + error.message);
-      setCurrentMatch(null);
-      return false;
-    }
-  };
-
-  const scanFrame = async () => {
-    if (!canvasRef.current || !videoRef.current || !isScanning) return;
-
-    try {
-      const context = canvasRef.current.getContext('2d');
-      context.drawImage(videoRef.current, 0, 0);
-      
-      await matchImage(canvasRef.current);
-      
-      if (currentMatch && overlayVideoRef.current && overlayVideoRef.current.paused) {
-        setDebug(prev => prev + '\nPlaying matched video');
-        overlayVideoRef.current.style.display = 'block';
-        await overlayVideoRef.current.play().catch(e => {
-          setDebug(prev => prev + '\nError playing video: ' + e.message);
-        });
-      }
-
-      if (isScanning) {
-        requestAnimationFrame(scanFrame);
-      }
-    } catch (error) {
-      setDebug(prev => prev + '\nScan frame error: ' + error.message);
-    }
-  };
-
-  const toggleScanning = () => {
-    setIsScanning(prev => {
-      const newValue = !prev;
-      setDebug(prevDebug => prevDebug + '\nScanning ' + (newValue ? 'started' : 'stopped'));
-      if (newValue) {
-        requestAnimationFrame(scanFrame);
-      }
-      return newValue;
-    });
-  };
+  }, [addDebug]);
 
   return (
     <div className="flex flex-col items-center min-h-screen bg-gray-100 p-4">
@@ -279,9 +257,20 @@ const ARViewer = () => {
               playsInline
               loop
               muted
+              style={{ display: 'none' }}
             />
           )}
           
+          {/* Status Overlay */}
+          <div className="absolute top-2 left-2 right-2 flex justify-between">
+            <div className="bg-black bg-opacity-50 text-white px-3 py-1 rounded">
+              {isScanning ? 'Scanning...' : 'Ready'}
+            </div>
+            <div className="bg-black bg-opacity-50 text-white px-3 py-1 rounded">
+              {matchStatus}
+            </div>
+          </div>
+
           {!hasPermission && (
             <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
               <p className="text-white text-lg">Camera access required</p>
@@ -289,24 +278,25 @@ const ARViewer = () => {
           )}
         </div>
 
-        <div className="mt-6 flex justify-center">
+        <div className="mt-6 flex justify-center gap-4">
           {hasPermission && (
-            <button
-              onClick={toggleScanning}
-              className={`px-6 py-3 rounded-lg font-semibold ${
-                isScanning
-                  ? 'bg-red-500 hover:bg-red-600 text-white'
-                  : 'bg-blue-500 hover:bg-blue-600 text-white'
-              }`}
-            >
-              {isScanning ? 'Stop Scanning' : 'Start Scanning'}
-            </button>
+            <>
+              <button
+                onClick={() => setIsScanning(!isScanning)}
+                className={`px-6 py-3 rounded-lg font-semibold ${
+                  isScanning
+                    ? 'bg-red-500 hover:bg-red-600 text-white'
+                    : 'bg-blue-500 hover:bg-blue-600 text-white'
+                }`}
+              >
+                {isScanning ? 'Stop Scanning' : 'Start Scanning'}
+              </button>
+            </>
           )}
         </div>
         
-        {/* Debug Information */}
-        <div className="mt-4 p-2 bg-gray-100 rounded text-xs font-mono whitespace-pre-wrap">
-          Permission: {hasPermission ? 'Granted' : 'Not Granted'}
+        {/* Debug Panel */}
+        <div className="mt-4 p-2 bg-gray-100 rounded text-xs font-mono whitespace-pre-wrap h-32 overflow-y-auto">
           {debug}
         </div>
       </div>
