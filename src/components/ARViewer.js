@@ -2,7 +2,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import styled from 'styled-components';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, getDocs, query, where } from 'firebase/firestore';
+import { getFirestore, doc, getDoc } from 'firebase/firestore';
+import { useNavigate } from 'react-router-dom';
 
 // Firebase configuration
 const firebaseConfig = {
@@ -22,6 +23,26 @@ const db = getFirestore(app);
 const ARViewer = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [cameraPermission, setCameraPermission] = useState(false);
+  const navigate = useNavigate();
+
+  const requestCameraPermission = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        } 
+      });
+      stream.getTracks().forEach(track => track.stop());
+      setCameraPermission(true);
+      return true;
+    } catch (err) {
+      setError('Please allow camera access to view AR content');
+      return false;
+    }
+  }, []);
 
   const loadScript = useCallback((url) => {
     return new Promise((resolve, reject) => {
@@ -36,134 +57,157 @@ const ARViewer = () => {
 
   const loadARScripts = useCallback(async () => {
     try {
-      // Load AFRAME core
       await loadScript('https://aframe.io/releases/1.4.0/aframe.min.js');
-      // Load AR.js with improved image tracking
       await loadScript('https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js');
-      // Load gesture handler for better mobile interaction
       await loadScript('https://raw.githack.com/fcor/arjs-gestures/master/dist/gestures.js');
     } catch (error) {
       throw new Error('Failed to load AR libraries');
     }
   }, [loadScript]);
 
-  const getExperienceData = useCallback(async () => {
+  const getExperienceData = useCallback(async (id) => {
     try {
-      // Get experience ID from URL parameters
-      const urlParams = new URLSearchParams(window.location.search);
-      const experienceId = urlParams.get('id');
+      const docRef = doc(db, 'arExperiences', id);
+      const docSnap = await getDoc(docRef);
 
-      if (!experienceId) {
-        throw new Error('No experience ID provided');
+      if (!docSnap.exists()) {
+        throw new Error('AR experience not found');
       }
 
-      // Query Firestore for the specific experience
-      const experienceRef = collection(db, 'arExperiences');
-      const q = query(experienceRef, where('__name__', '==', experienceId));
-      const querySnapshot = await getDocs(q);
-
-      if (querySnapshot.empty) {
-        throw new Error('Experience not found');
-      }
-
-      return querySnapshot.docs[0].data();
+      return {
+        ...docSnap.data(),
+        id: docSnap.id
+      };
     } catch (error) {
-      throw new Error('Failed to fetch AR experience data');
+      throw new Error('Failed to load AR experience');
     }
   }, []);
 
   const setupARScene = useCallback(async (arExperience) => {
-    // Create AR Scene
-    const scene = document.createElement('a-scene');
-    scene.setAttribute('embedded', '');
-    scene.setAttribute('gesture-detector', '');
-    scene.setAttribute('arjs', `
-      sourceType: webcam;
-      debugUIEnabled: false;
-      detectionMode: mono;
-      imageTracking: true;
-      sourceWidth: 1280;
-      sourceHeight: 960;
-      displayWidth: 1280;
-      displayHeight: 960;
-    `);
-    scene.setAttribute('vr-mode-ui', 'enabled: false');
-    scene.setAttribute('renderer', 'antialias: true; alpha: true');
+    try {
+      // Create AR Scene
+      const scene = document.createElement('a-scene');
+      scene.setAttribute('embedded', '');
+      scene.setAttribute('gesture-detector', '');
+      scene.setAttribute('arjs', `
+        sourceType: webcam;
+        debugUIEnabled: false;
+        patternRatio: 0.75;
+        detectionMode: mono_and_matrix;
+        matrixCodeType: 3x3;
+        sourceWidth: 1280;
+        sourceHeight: 720;
+        displayWidth: 1280;
+        displayHeight: 720;
+        maxDetectionRate: 60;
+        canvasWidth: 1280;
+        canvasHeight: 720;
+      `);
+      scene.setAttribute('vr-mode-ui', 'enabled: false');
+      scene.setAttribute('renderer', 'antialias: true; alpha: true; precision: mediump;');
 
-    // Create assets container
-    const assets = document.createElement('a-assets');
-    
-    // Set up video with proper attributes
-    const video = document.createElement('video');
-    video.id = 'ar-video';
-    video.src = arExperience.videoUrl;
-    video.preload = 'auto';
-    video.response = true;
-    video.loop = true;
-    video.playsinline = true;
-    video.setAttribute('webkit-playsinline', '');
-    video.crossOrigin = 'anonymous';
-    assets.appendChild(video);
-    scene.appendChild(assets);
+      // Create assets
+      const assets = document.createElement('a-assets');
+      const video = document.createElement('video');
+      video.id = 'ar-video';
+      video.src = arExperience.videoUrl;
+      video.setAttribute('preload', 'auto');
+      video.setAttribute('loop', '');
+      video.setAttribute('playsinline', '');
+      video.setAttribute('webkit-playsinline', '');
+      video.setAttribute('crossorigin', 'anonymous');
+      video.muted = true;
+      assets.appendChild(video);
+      scene.appendChild(assets);
 
-    // Create image target
-    const imageTarget = document.createElement('a-nft');
-    imageTarget.setAttribute('type', 'nft');
-    imageTarget.setAttribute('url', arExperience.markerUrl);
-    imageTarget.setAttribute('smooth', 'true');
-    imageTarget.setAttribute('smoothCount', '10');
-    imageTarget.setAttribute('smoothTolerance', '.01');
-    imageTarget.setAttribute('smoothThreshold', '5');
+      // Create marker
+      const marker = document.createElement('a-marker');
+      marker.setAttribute('preset', 'custom');
+      marker.setAttribute('type', 'pattern');
+      marker.setAttribute('url', arExperience.markerUrl);
+      marker.setAttribute('smooth', 'true');
+      marker.setAttribute('smoothCount', '5');
+      marker.setAttribute('smoothTolerance', '0.01');
+      marker.setAttribute('smoothThreshold', '2');
+      marker.setAttribute('raycaster', 'objects: .clickable');
+      marker.setAttribute('emitevents', 'true');
 
-    // Create video plane
-    const videoEntity = document.createElement('a-video');
-    videoEntity.setAttribute('src', '#ar-video');
-    videoEntity.setAttribute('position', '0 0 0');
-    videoEntity.setAttribute('rotation', '-90 0 0');
-    videoEntity.setAttribute('width', '1');
-    videoEntity.setAttribute('height', '0.75');
-    videoEntity.setAttribute('gesture-handler', '');
-    imageTarget.appendChild(videoEntity);
+      // Create video entity
+      const videoEntity = document.createElement('a-video');
+      videoEntity.setAttribute('src', '#ar-video');
+      videoEntity.setAttribute('scale', '1 1 1');
+      videoEntity.setAttribute('position', '0 0 0');
+      videoEntity.setAttribute('rotation', '-90 0 0');
+      videoEntity.setAttribute('class', 'clickable');
+      marker.appendChild(videoEntity);
 
-    // Add marker detection handlers
-    imageTarget.addEventListener('markerFound', () => {
-      console.log('Marker detected');
-      video.play().catch(console.error);
-      const instructions = document.querySelector('.instructions');
-      if (instructions) instructions.style.display = 'none';
-    });
+      // Handle marker detection
+      let markerVisible = false;
+      marker.addEventListener('markerFound', () => {
+        if (!markerVisible) {
+          console.log('Marker detected');
+          markerVisible = true;
+          video.play().catch(console.error);
+          setTimeout(() => {
+            video.muted = false;
+          }, 1000);
+          const instructions = document.querySelector('.instructions');
+          if (instructions) instructions.style.display = 'none';
+        }
+      });
 
-    imageTarget.addEventListener('markerLost', () => {
-      console.log('Marker lost');
-      video.pause();
-      const instructions = document.querySelector('.instructions');
-      if (instructions) instructions.style.display = 'block';
-    });
+      marker.addEventListener('markerLost', () => {
+        if (markerVisible) {
+          console.log('Marker lost');
+          markerVisible = false;
+          video.muted = true;
+          const instructions = document.querySelector('.instructions');
+          if (instructions) instructions.style.display = 'block';
+        }
+      });
 
-    // Add camera
-    const camera = document.createElement('a-entity');
-    camera.setAttribute('camera', '');
-    camera.setAttribute('position', '0 0 0');
-    camera.setAttribute('look-controls', 'enabled: false');
+      // Add camera
+      const camera = document.createElement('a-entity');
+      camera.setAttribute('camera', '');
 
-    // Append elements to scene
-    scene.appendChild(imageTarget);
-    scene.appendChild(camera);
+      // Append elements
+      scene.appendChild(marker);
+      scene.appendChild(camera);
+      document.body.appendChild(scene);
 
-    // Add scene to document
-    document.body.appendChild(scene);
+      // Enable video on interaction
+      const enableVideo = () => {
+        video.play().catch(console.error);
+        document.removeEventListener('click', enableVideo);
+        document.removeEventListener('touchstart', enableVideo);
+      };
 
-    // Handle initial video interaction
-    document.addEventListener('click', () => {
-      video.play().catch(console.error);
-    }, { once: true });
+      document.addEventListener('click', enableVideo);
+      document.addEventListener('touchstart', enableVideo);
+
+    } catch (error) {
+      console.error('Error setting up AR scene:', error);
+      throw new Error('Failed to setup AR experience');
+    }
   }, []);
 
   useEffect(() => {
     const initAR = async () => {
       try {
+        const urlParams = new URLSearchParams(window.location.search);
+        const id = urlParams.get('id');
+
+        if (!id) {
+          navigate('/');
+          return;
+        }
+
+        // Request camera permission
+        const hasPermission = await requestCameraPermission();
+        if (!hasPermission) return;
+
         await loadARScripts();
-        const arExperience = await getExperienceData();
+        const arExperience = await getExperienceData(id);
         await setupARScene(arExperience);
         setLoading(false);
       } catch (error) {
@@ -179,7 +223,7 @@ const ARViewer = () => {
       const scene = document.querySelector('a-scene');
       if (scene) scene.parentNode.removeChild(scene);
     };
-  }, [loadARScripts, getExperienceData, setupARScene]);
+  }, [loadARScripts, getExperienceData, setupARScene, requestCameraPermission, navigate]);
 
   return (
     <Container>
@@ -193,13 +237,12 @@ const ARViewer = () => {
         </ErrorContainer>
       )}
       <Instructions className="instructions">
-        Point your camera at the marker to view AR content
+        Point your camera at the marker image
       </Instructions>
     </Container>
   );
 };
 
-// Styled Components remain the same
 const Container = styled.div`
   position: fixed;
   top: 0;
@@ -207,11 +250,6 @@ const Container = styled.div`
   width: 100%;
   height: 100%;
   overflow: hidden;
-  z-index: 1;
-
-  & > div {
-    z-index: 1;
-  }
 `;
 
 const Instructions = styled.div`
@@ -228,7 +266,6 @@ const Instructions = styled.div`
   z-index: 2;
   width: 80%;
   max-width: 400px;
-  pointer-events: none;
 `;
 
 const LoadingScreen = styled.div`
