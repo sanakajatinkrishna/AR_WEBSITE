@@ -25,6 +25,17 @@ const ARViewer = () => {
   const [error, setError] = useState(null);
   const navigate = useNavigate();
 
+  const loadScript = useCallback((url) => {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = url;
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+  }, []);
+
   const requestCameraPermission = useCallback(async () => {
     try {
       await navigator.mediaDevices.getUserMedia({ 
@@ -51,18 +62,7 @@ const ARViewer = () => {
     } catch (error) {
       throw new Error('Failed to load AR libraries. Please check your internet connection.');
     }
-  }, []);
-
-  const loadScript = useCallback((url) => {
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = url;
-      script.async = true;
-      script.onload = resolve;
-      script.onerror = reject;
-      document.head.appendChild(script);
-    });
-  }, []);
+  }, [loadScript]); // Added loadScript to dependencies
 
   const getExperienceData = useCallback(async (id) => {
     try {
@@ -83,6 +83,8 @@ const ARViewer = () => {
   }, []);
 
   const setupARScene = useCallback(async (arExperience) => {
+    if (!arExperience) return;
+
     try {
       // Create AR Scene
       const scene = document.createElement('a-scene');
@@ -146,7 +148,8 @@ const ARViewer = () => {
           markerVisible = true;
           video.play().catch(console.error);
           video.muted = false;
-          document.querySelector('.instructions')?.classList.add('hidden');
+          const instructions = document.querySelector('.instructions');
+          if (instructions) instructions.classList.add('hidden');
         }
       });
 
@@ -154,7 +157,8 @@ const ARViewer = () => {
         if (markerVisible) {
           markerVisible = false;
           video.muted = true;
-          document.querySelector('.instructions')?.classList.remove('hidden');
+          const instructions = document.querySelector('.instructions');
+          if (instructions) instructions.classList.remove('hidden');
         }
       });
 
@@ -177,9 +181,11 @@ const ARViewer = () => {
     } catch (error) {
       throw new Error('Failed to setup AR experience. Please refresh and try again.');
     }
-  }, []);
+  }, []); // No external dependencies needed
 
   useEffect(() => {
+    let mounted = true;
+
     const initAR = async () => {
       try {
         const urlParams = new URLSearchParams(window.location.search);
@@ -191,43 +197,52 @@ const ARViewer = () => {
         }
 
         const hasCamera = await requestCameraPermission();
-        if (!hasCamera) return;
+        if (!hasCamera || !mounted) return;
 
         await loadARScripts();
+        if (!mounted) return;
+
         const arExperience = await getExperienceData(id);
+        if (!mounted) return;
+
         await setupARScene(arExperience);
-        setLoading(false);
+        if (mounted) {
+          setLoading(false);
+        }
       } catch (error) {
         console.error('AR initialization error:', error);
-        setError(error.message);
-        setLoading(false);
+        if (mounted) {
+          setError(error.message);
+          setLoading(false);
+        }
       }
     };
 
     initAR();
 
     return () => {
+      mounted = false;
       const scene = document.querySelector('a-scene');
-      if (scene) scene.parentNode.removeChild(scene);
+      if (scene) {
+        scene.parentNode.removeChild(scene);
+      }
     };
   }, [loadARScripts, getExperienceData, setupARScene, requestCameraPermission, navigate]);
 
-  if (!loading && error) {
-    return (
-      <ErrorContainer>
-        <ErrorContent>
-          <ErrorText>{error}</ErrorText>
-          <RetryButton onClick={() => window.location.reload()}>
-            Try Again
-          </RetryButton>
-        </ErrorContent>
-      </ErrorContainer>
-    );
-  }
-
+  // Rest of the component remains the same...
   return (
     <Container>
       {loading && <LoadingScreen>Loading AR Experience...</LoadingScreen>}
+      {error && (
+        <ErrorContainer>
+          <ErrorContent>
+            <ErrorText>{error}</ErrorText>
+            <RetryButton onClick={() => window.location.reload()}>
+              Try Again
+            </RetryButton>
+          </ErrorContent>
+        </ErrorContainer>
+      )}
       <Instructions className="instructions">
         Point your camera at the marker image
       </Instructions>
@@ -235,7 +250,7 @@ const ARViewer = () => {
   );
 };
 
-// Styled components
+// Styled components remain the same...
 const Container = styled.div`
   position: fixed;
   top: 0;
@@ -288,11 +303,11 @@ const ErrorContainer = styled.div`
   left: 0;
   width: 100%;
   height: 100%;
-  background: #1a1a1a;
   display: flex;
   justify-content: center;
   align-items: center;
-  padding: 20px;
+  background: rgba(0, 0, 0, 0.9);
+  z-index: 1000;
 `;
 
 const ErrorContent = styled.div`
