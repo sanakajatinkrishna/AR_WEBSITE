@@ -23,24 +23,33 @@ const db = getFirestore(app);
 const ARViewer = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [cameraPermission, setCameraPermission] = useState(false);
   const navigate = useNavigate();
 
   const requestCameraPermission = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
+      await navigator.mediaDevices.getUserMedia({ 
         video: { 
           facingMode: 'environment',
           width: { ideal: 1280 },
           height: { ideal: 720 }
         } 
       });
-      stream.getTracks().forEach(track => track.stop());
-      setCameraPermission(true);
       return true;
     } catch (err) {
-      setError('Please allow camera access to view AR content');
+      setError('Camera access is required to view AR content. Please allow camera access and refresh the page.');
       return false;
+    }
+  }, []);
+
+  const loadARScripts = useCallback(async () => {
+    try {
+      await Promise.all([
+        loadScript('https://aframe.io/releases/1.4.0/aframe.min.js'),
+        loadScript('https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js'),
+        loadScript('https://raw.githack.com/fcor/arjs-gestures/master/dist/gestures.js')
+      ]);
+    } catch (error) {
+      throw new Error('Failed to load AR libraries. Please check your internet connection.');
     }
   }, []);
 
@@ -55,23 +64,13 @@ const ARViewer = () => {
     });
   }, []);
 
-  const loadARScripts = useCallback(async () => {
-    try {
-      await loadScript('https://aframe.io/releases/1.4.0/aframe.min.js');
-      await loadScript('https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js');
-      await loadScript('https://raw.githack.com/fcor/arjs-gestures/master/dist/gestures.js');
-    } catch (error) {
-      throw new Error('Failed to load AR libraries');
-    }
-  }, [loadScript]);
-
   const getExperienceData = useCallback(async (id) => {
     try {
       const docRef = doc(db, 'arExperiences', id);
       const docSnap = await getDoc(docRef);
 
       if (!docSnap.exists()) {
-        throw new Error('AR experience not found');
+        throw new Error('AR experience not found. Please check the URL and try again.');
       }
 
       return {
@@ -79,7 +78,7 @@ const ARViewer = () => {
         id: docSnap.id
       };
     } catch (error) {
-      throw new Error('Failed to load AR experience');
+      throw new Error('Failed to load AR experience data. Please try again.');
     }
   }, []);
 
@@ -141,53 +140,42 @@ const ARViewer = () => {
       videoEntity.setAttribute('class', 'clickable');
       marker.appendChild(videoEntity);
 
-      // Handle marker detection
       let markerVisible = false;
       marker.addEventListener('markerFound', () => {
         if (!markerVisible) {
-          console.log('Marker detected');
           markerVisible = true;
           video.play().catch(console.error);
-          setTimeout(() => {
-            video.muted = false;
-          }, 1000);
-          const instructions = document.querySelector('.instructions');
-          if (instructions) instructions.style.display = 'none';
+          video.muted = false;
+          document.querySelector('.instructions')?.classList.add('hidden');
         }
       });
 
       marker.addEventListener('markerLost', () => {
         if (markerVisible) {
-          console.log('Marker lost');
           markerVisible = false;
           video.muted = true;
-          const instructions = document.querySelector('.instructions');
-          if (instructions) instructions.style.display = 'block';
+          document.querySelector('.instructions')?.classList.remove('hidden');
         }
       });
 
       // Add camera
       const camera = document.createElement('a-entity');
       camera.setAttribute('camera', '');
-
-      // Append elements
       scene.appendChild(marker);
       scene.appendChild(camera);
+
+      // Add scene to document
       document.body.appendChild(scene);
 
       // Enable video on interaction
       const enableVideo = () => {
         video.play().catch(console.error);
-        document.removeEventListener('click', enableVideo);
-        document.removeEventListener('touchstart', enableVideo);
       };
-
-      document.addEventListener('click', enableVideo);
-      document.addEventListener('touchstart', enableVideo);
+      document.addEventListener('click', enableVideo, { once: true });
+      document.addEventListener('touchstart', enableVideo, { once: true });
 
     } catch (error) {
-      console.error('Error setting up AR scene:', error);
-      throw new Error('Failed to setup AR experience');
+      throw new Error('Failed to setup AR experience. Please refresh and try again.');
     }
   }, []);
 
@@ -202,9 +190,8 @@ const ARViewer = () => {
           return;
         }
 
-        // Request camera permission
-        const hasPermission = await requestCameraPermission();
-        if (!hasPermission) return;
+        const hasCamera = await requestCameraPermission();
+        if (!hasCamera) return;
 
         await loadARScripts();
         const arExperience = await getExperienceData(id);
@@ -225,17 +212,22 @@ const ARViewer = () => {
     };
   }, [loadARScripts, getExperienceData, setupARScene, requestCameraPermission, navigate]);
 
-  return (
-    <Container>
-      {loading && <LoadingScreen>Loading AR Experience...</LoadingScreen>}
-      {error && (
-        <ErrorContainer>
+  if (!loading && error) {
+    return (
+      <ErrorContainer>
+        <ErrorContent>
           <ErrorText>{error}</ErrorText>
           <RetryButton onClick={() => window.location.reload()}>
             Try Again
           </RetryButton>
-        </ErrorContainer>
-      )}
+        </ErrorContent>
+      </ErrorContainer>
+    );
+  }
+
+  return (
+    <Container>
+      {loading && <LoadingScreen>Loading AR Experience...</LoadingScreen>}
       <Instructions className="instructions">
         Point your camera at the marker image
       </Instructions>
@@ -243,6 +235,7 @@ const ARViewer = () => {
   );
 };
 
+// Styled components
 const Container = styled.div`
   position: fixed;
   top: 0;
@@ -266,6 +259,12 @@ const Instructions = styled.div`
   z-index: 2;
   width: 80%;
   max-width: 400px;
+  transition: opacity 0.3s ease;
+  
+  &.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
 `;
 
 const LoadingScreen = styled.div`
@@ -285,29 +284,41 @@ const LoadingScreen = styled.div`
 
 const ErrorContainer = styled.div`
   position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  background: rgba(0, 0, 0, 0.8);
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: #1a1a1a;
+  display: flex;
+  justify-content: center;
+  align-items: center;
   padding: 20px;
+`;
+
+const ErrorContent = styled.div`
+  background: rgba(255, 255, 255, 0.1);
+  padding: 30px;
   border-radius: 10px;
   text-align: center;
-  color: white;
-  z-index: 999;
+  max-width: 400px;
+  width: 100%;
 `;
 
 const ErrorText = styled.div`
+  color: white;
   margin-bottom: 20px;
+  line-height: 1.5;
 `;
 
 const RetryButton = styled.button`
   background: #2196F3;
   color: white;
   border: none;
-  padding: 10px 20px;
+  padding: 12px 24px;
   border-radius: 5px;
   cursor: pointer;
   font-size: 16px;
+  transition: background-color 0.3s ease;
   
   &:hover {
     background: #1976D2;
