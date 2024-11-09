@@ -1,8 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, getDocs } from 'firebase/firestore';
+import { getStorage, ref, getDownloadURL } from 'firebase/storage';
 
-// Firebase config
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -15,6 +15,7 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+const storage = getStorage(app);
 
 const ARViewer = () => {
   const videoRef = useRef(null);
@@ -31,47 +32,85 @@ const ARViewer = () => {
   const [currentMatch, setCurrentMatch] = useState(null);
   const [isProcessingFrame, setIsProcessingFrame] = useState(false);
   const [matchStatus, setMatchStatus] = useState('');
+  const [referenceImages, setReferenceImages] = useState(new Map());
 
   const addDebug = useCallback((message) => {
-    console.log(message); // For immediate feedback in console
-    setDebug(prev => `${message}\n${prev}`.slice(0, 1000)); // Keep last 1000 chars
+    console.log(message);
+    setDebug(prev => `${message}\n${prev}`.slice(0, 1000));
   }, []);
 
-  // Process a single frame from the video
-  const processFrame = useCallback(async () => {
-    if (!canvasRef.current || !videoRef.current) return;
+  // Load and cache reference images
+  const loadReferenceImage = useCallback(async (imageUrl) => {
+    if (referenceImages.has(imageUrl)) {
+      return referenceImages.get(imageUrl);
+    }
 
-    const context = canvasRef.current.getContext('2d');
-    // Flip canvas horizontally for front camera if needed
-    context.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
-    
-    // Get frame data for processing
-    const frameData = context.getImageData(0, 0, canvasRef.current.width, canvasRef.current.height);
-    return frameData;
-  }, []);
-
-  // Compare current frame with reference image
-  const compareWithReference = useCallback(async (frameData, referenceImage) => {
     try {
-      // Convert frame to tensor
-      const frameTensor = window.tf.browser.fromPixels(frameData);
-      const resizedFrame = window.tf.image.resizeBilinear(frameTensor, [224, 224]);
-      const normalizedFrame = resizedFrame.div(255.0);
+      // Get the actual download URL from Firebase Storage
+      const imageRef = ref(storage, imageUrl);
+      const downloadURL = await getDownloadURL(imageRef);
 
-      // Convert reference image to tensor
+      // Create and load the image
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('Failed to load image'));
+        img.src = downloadURL;
+      });
+
+      // Cache the loaded image
+      setReferenceImages(prev => new Map(prev).set(imageUrl, img));
+      addDebug(`Successfully loaded reference image: ${imageUrl}`);
+      return img;
+    } catch (error) {
+      addDebug(`Error loading reference image: ${error.message}`);
+      throw error;
+    }
+  }, [referenceImages, addDebug]);
+
+  const processFrame = useCallback(async () => {
+    if (!canvasRef.current || !videoRef.current) return null;
+
+    try {
+      const context = canvasRef.current.getContext('2d');
+      canvasRef.current.width = videoRef.current.videoWidth;
+      canvasRef.current.height = videoRef.current.videoHeight;
+      context.drawImage(videoRef.current, 0, 0);
+      
+      return context.getImageData(0, 0, canvasRef.current.width, canvasRef.current.height);
+    } catch (error) {
+      addDebug(`Error processing frame: ${error.message}`);
+      return null;
+    }
+  }, [addDebug]);
+
+  const compareWithReference = useCallback(async (frameData, referenceImage) => {
+    if (!frameData || !referenceImage) return 0;
+
+    try {
+      const frameTensor = window.tf.browser.fromPixels(frameData);
       const refTensor = window.tf.browser.fromPixels(referenceImage);
-      const resizedRef = window.tf.image.resizeBilinear(refTensor, [224, 224]);
+
+      // Ensure both tensors are the same size
+      const targetSize = [224, 224];
+      const resizedFrame = window.tf.image.resizeBilinear(frameTensor, targetSize);
+      const resizedRef = window.tf.image.resizeBilinear(refTensor, targetSize);
+
+      // Normalize the pixels
+      const normalizedFrame = resizedFrame.div(255.0);
       const normalizedRef = resizedRef.div(255.0);
 
-      // Calculate similarity score
-      const frameFeatures = normalizedFrame.reshape([1, -1]);
-      const refFeatures = normalizedRef.reshape([1, -1]);
-      
-      const similarity = window.tf.metrics.cosineProximity(frameFeatures, refFeatures).dataSync()[0];
+      // Calculate similarity
+      const similarity = window.tf.metrics.cosineProximity(
+        normalizedFrame.reshape([1, -1]),
+        normalizedRef.reshape([1, -1])
+      ).dataSync()[0];
 
-      // Cleanup tensors
-      [frameTensor, resizedFrame, normalizedFrame, refTensor, resizedRef, normalizedRef, frameFeatures, refFeatures]
-        .forEach(tensor => tensor.dispose());
+      // Cleanup
+      [frameTensor, refTensor, resizedFrame, resizedRef, normalizedFrame, normalizedRef]
+        .forEach(t => t.dispose());
 
       return similarity;
     } catch (error) {
@@ -80,14 +119,13 @@ const ARViewer = () => {
     }
   }, [addDebug]);
 
-  // Main scanning function
   const scanFrame = useCallback(async () => {
     if (!isScanning || isProcessingFrame) return;
-    
+
     try {
       setIsProcessingFrame(true);
       const frameData = await processFrame();
-      
+
       if (!frameData) {
         addDebug('No frame data available');
         return;
@@ -97,43 +135,30 @@ const ARViewer = () => {
       for (const content of arContent) {
         if (!content.imageUrl) continue;
 
-        // Load reference image
-        const referenceImage = new Image();
-        referenceImage.crossOrigin = 'anonymous';
-        
         try {
-          // Load image and wait for it
-          await new Promise((resolve, reject) => {
-            referenceImage.onload = resolve;
-            referenceImage.onerror = reject;
-            referenceImage.src = content.imageUrl;
-          });
-
-          const similarity = await compareWithReference(frameData, referenceImage);
+          // Get cached or load new reference image
+          const referenceImage = await loadReferenceImage(content.imageUrl);
           
-          // Update match status for debugging
+          const similarity = await compareWithReference(frameData, referenceImage);
           setMatchStatus(`Similarity: ${similarity.toFixed(3)}`);
 
-          // If we have a good match
-          if (similarity > 0.7) { // Adjust threshold as needed
+          if (similarity > 0.7) {
             addDebug(`Match found! Similarity: ${similarity.toFixed(3)}`);
             setCurrentMatch(content);
             
-            // Play the video
             if (overlayVideoRef.current && overlayVideoRef.current.paused) {
               overlayVideoRef.current.style.display = 'block';
               await overlayVideoRef.current.play();
-              addDebug('Playing video overlay');
             }
-            return; // Stop checking other content once we find a match
+            return;
           }
         } catch (error) {
-          addDebug(`Error processing reference image: ${error.message}`);
+          addDebug(`Error processing content: ${error.message}`);
           continue;
         }
       }
 
-      // If we get here, no match was found
+      // Reset if no match found
       if (currentMatch) {
         setCurrentMatch(null);
         if (overlayVideoRef.current) {
@@ -146,12 +171,11 @@ const ARViewer = () => {
       addDebug(`Scan error: ${error.message}`);
     } finally {
       setIsProcessingFrame(false);
-      // Continue scanning
       if (isScanning) {
         animationFrameRef.current = requestAnimationFrame(scanFrame);
       }
     }
-  }, [isScanning, isProcessingFrame, arContent, processFrame, compareWithReference, currentMatch, addDebug]);
+  }, [isScanning, isProcessingFrame, arContent, processFrame, compareWithReference, currentMatch, loadReferenceImage, addDebug]);
 
   // Effect for scanning
   useEffect(() => {
@@ -186,6 +210,17 @@ const ARViewer = () => {
         });
         setArContent(content);
         addDebug(`Loaded ${content.length} AR content items`);
+
+        // Preload all reference images
+        for (const item of content) {
+          if (item.imageUrl) {
+            try {
+              await loadReferenceImage(item.imageUrl);
+            } catch (error) {
+              addDebug(`Failed to preload image: ${error.message}`);
+            }
+          }
+        }
       } catch (error) {
         setError(`Failed to load AR content: ${error.message}`);
         addDebug(`AR content load error: ${error.message}`);
@@ -193,14 +228,18 @@ const ARViewer = () => {
     };
 
     loadARContent();
-  }, [addDebug]);
+  }, [addDebug, loadReferenceImage]);
 
   // Initialize camera
   useEffect(() => {
     const initCamera = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' }
+          video: { 
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
         });
         
         if (videoRef.current) {
@@ -280,18 +319,16 @@ const ARViewer = () => {
 
         <div className="mt-6 flex justify-center gap-4">
           {hasPermission && (
-            <>
-              <button
-                onClick={() => setIsScanning(!isScanning)}
-                className={`px-6 py-3 rounded-lg font-semibold ${
-                  isScanning
-                    ? 'bg-red-500 hover:bg-red-600 text-white'
-                    : 'bg-blue-500 hover:bg-blue-600 text-white'
-                }`}
-              >
-                {isScanning ? 'Stop Scanning' : 'Start Scanning'}
-              </button>
-            </>
+            <button
+              onClick={() => setIsScanning(!isScanning)}
+              className={`px-6 py-3 rounded-lg font-semibold ${
+                isScanning
+                  ? 'bg-red-500 hover:bg-red-600 text-white'
+                  : 'bg-blue-500 hover:bg-blue-600 text-white'
+              }`}
+            >
+              {isScanning ? 'Stop Scanning' : 'Start Scanning'}
+            </button>
           )}
         </div>
         
