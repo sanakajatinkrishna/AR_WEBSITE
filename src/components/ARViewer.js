@@ -1,5 +1,5 @@
 // components/ARViewer.js
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import styled from 'styled-components';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, getDocs, query, where } from 'firebase/firestore';
@@ -23,7 +23,18 @@ const ARViewer = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  const loadARScripts = async () => {
+  const loadScript = useCallback((url) => {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = url;
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+  }, []);
+
+  const loadARScripts = useCallback(async () => {
     try {
       // Load AFRAME core
       await loadScript('https://aframe.io/releases/1.4.0/aframe.min.js');
@@ -34,20 +45,9 @@ const ARViewer = () => {
     } catch (error) {
       throw new Error('Failed to load AR libraries');
     }
-  };
+  }, [loadScript]);
 
-  const loadScript = (url) => {
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = url;
-      script.async = true;
-      script.onload = resolve;
-      script.onerror = reject;
-      document.head.appendChild(script);
-    });
-  };
-
-  const getExperienceData = async () => {
+  const getExperienceData = useCallback(async () => {
     try {
       // Get experience ID from URL parameters
       const urlParams = new URLSearchParams(window.location.search);
@@ -70,9 +70,9 @@ const ARViewer = () => {
     } catch (error) {
       throw new Error('Failed to fetch AR experience data');
     }
-  };
+  }, []);
 
-  const setupARScene = async (arExperience) => {
+  const setupARScene = useCallback(async (arExperience) => {
     // Create AR Scene
     const scene = document.createElement('a-scene');
     scene.setAttribute('embedded', '');
@@ -92,7 +92,7 @@ const ARViewer = () => {
 
     // Create assets container
     const assets = document.createElement('a-assets');
-
+    
     // Set up video with proper attributes
     const video = document.createElement('video');
     video.id = 'ar-video';
@@ -157,7 +157,7 @@ const ARViewer = () => {
     document.addEventListener('click', () => {
       video.play().catch(console.error);
     }, { once: true });
-  };
+  }, []);
 
   useEffect(() => {
     const initAR = async () => {
@@ -179,7 +179,7 @@ const ARViewer = () => {
       const scene = document.querySelector('a-scene');
       if (scene) scene.parentNode.removeChild(scene);
     };
-  }, []);
+  }, [loadARScripts, getExperienceData, setupARScene]);
 
   return (
     <Container>
