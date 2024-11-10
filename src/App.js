@@ -6,7 +6,7 @@ const ARViewer = () => {
 
   useEffect(() => {
     let stream = null;
-    
+
     const startCamera = async () => {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -20,7 +20,7 @@ const ARViewer = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-
+          
           // Request fullscreen after video starts playing
           if (containerRef.current && containerRef.current.requestFullscreen) {
             containerRef.current.requestFullscreen();
@@ -44,7 +44,6 @@ const ARViewer = () => {
 
     document.addEventListener('fullscreenchange', handleFullscreenChange);
 
-    // Cleanup function
     return () => {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
@@ -54,31 +53,21 @@ const ARViewer = () => {
   }, []);
 
   return (
-    <div 
-      ref={containerRef} 
-      className="fixed inset-0 w-screen h-screen overflow-hidden bg-black"
-      style={{
-        width: '100vw',
-        height: '100vh'
-      }}
-    >
-      {/* Camera Feed */}
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
-        className="absolute inset-0 w-full h-full object-cover"
-        style={{
-          width: '100vw',
-          height: '100vh',
-          objectFit: 'cover'
-        }}
-      />
-
-      {/* Target Rectangle */}
+    <div className="relative h-screen w-screen bg-black">
+      {/* Camera Container */}
+      <div ref={containerRef} className="absolute inset-0">
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className="h-full w-full object-cover"
+        />
+      </div>
+      
+      {/* Rectangle Overlay */}
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-        <div className="w-64 h-96 border-4 border-red-500 rounded-lg" />
+        <div className="w-64 h-96 border-2 border-red-500 rounded-lg" />
       </div>
     </div>
   );
