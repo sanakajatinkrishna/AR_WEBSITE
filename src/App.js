@@ -89,8 +89,7 @@ const ARViewer = () => {
           style={{
             width: '80vw',
             height: '60vh',
-            borderRadius: '8px',
-            boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.5)'
+            borderRadius: '8px'
           }}
         />
       </div>
