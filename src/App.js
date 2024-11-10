@@ -2,6 +2,8 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, getDocs } from 'firebase/firestore';
 import { getStorage, ref, getDownloadURL } from 'firebase/storage';
+import * as tf from '@tensorflow/tfjs';
+import '@tensorflow/tfjs-backend-webgl';
 
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
@@ -18,21 +20,14 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const storage = getStorage(app);
 
-// Simple Alert Component
-const Alert = ({ children }) => (
-  <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
-    {children}
-  </div>
-);
-
 const ARViewer = () => {
   // Refs
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const streamRef = useRef(null);
+  const mobilenetRef = useRef(null);
   const rafRef = useRef(null);
-  const modelRef = useRef(null);
 
   // State
   const [hasPermission, setHasPermission] = useState(false);
@@ -46,41 +41,40 @@ const ARViewer = () => {
   // Debug logger
   const addDebug = useCallback((message) => {
     console.log(message);
-    setDebug(prev => `${message}\n${prev}`);
+    setDebug(prev => `${message}\n${prev}`.slice(0, 1000));
   }, []);
 
-  // Initialize TensorFlow
+  // Initialize TensorFlow and load MobileNet
   useEffect(() => {
-    const loadModel = async () => {
+    const initTensorFlow = async () => {
       try {
-        addDebug('Loading TensorFlow model...');
-        const model = await window.tf.loadGraphModel(
-          'https://tfhub.dev/tensorflow/tfjs-model/ssd_mobilenet_v2/1/default/1'
+        addDebug('Initializing TensorFlow...');
+        await tf.setBackend('webgl');
+        await tf.ready();
+        addDebug('Loading MobileNet model...');
+        
+        const model = await tf.loadLayersModel(
+          'https://storage.googleapis.com/tfjs-models/tfjs/mobilenet_v1_0.25_224/model.json'
         );
-        modelRef.current = model;
+        
+        mobilenetRef.current = model;
         setIsModelLoading(false);
-        addDebug('Model loaded successfully');
+        addDebug('Models loaded successfully');
       } catch (error) {
-        setError(`Model loading error: ${error.message}`);
-        addDebug(`Model loading error: ${error.message}`);
+        setError(`Model initialization error: ${error.message}`);
+        addDebug(`Model initialization failed: ${error.message}`);
         setIsModelLoading(false);
       }
     };
 
-    if (window.tf) {
-      loadModel();
-    } else {
-      setError('TensorFlow not loaded');
-      setIsModelLoading(false);
-    }
+    initTensorFlow();
 
     return () => {
-      if (modelRef.current) {
-        modelRef.current.dispose();
+      if (mobilenetRef.current) {
+        mobilenetRef.current.dispose();
       }
     };
   }, [addDebug]);
-
   // Initialize camera
   useEffect(() => {
     const initCamera = async () => {
@@ -96,13 +90,19 @@ const ARViewer = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           streamRef.current = stream;
-          await videoRef.current.play();
+          
+          await new Promise((resolve) => {
+            videoRef.current.onloadedmetadata = () => {
+              videoRef.current.play().then(resolve);
+            };
+          });
+          
           setHasPermission(true);
-          addDebug('Camera initialized');
+          addDebug('Camera initialized successfully');
         }
       } catch (err) {
-        setError(`Camera error: ${err.message}`);
-        addDebug(`Camera error: ${err.message}`);
+        setError(`Camera access error: ${err.message}`);
+        addDebug(`Camera initialization failed: ${err.message}`);
         setHasPermission(false);
       }
     };
@@ -116,20 +116,25 @@ const ARViewer = () => {
     };
   }, [addDebug]);
 
-  // Load AR content
+  // Load AR content from Firebase
   useEffect(() => {
     const loadContent = async () => {
+      if (isModelLoading) return;
+      
       try {
+        addDebug('Loading AR content...');
         const querySnapshot = await getDocs(collection(db, 'arContent'));
         const content = [];
 
         for (const doc of querySnapshot.docs) {
           const data = doc.data();
           try {
-            // Get download URLs
+            const imageRef = ref(storage, data.imageUrl);
+            const videoRef = ref(storage, data.videoUrl);
+            
             const [imageUrl, videoUrl] = await Promise.all([
-              getDownloadURL(ref(storage, data.imageUrl)),
-              getDownloadURL(ref(storage, data.videoUrl))
+              getDownloadURL(imageRef),
+              getDownloadURL(videoRef)
             ]);
 
             content.push({
@@ -138,59 +143,71 @@ const ARViewer = () => {
               imageUrl,
               videoUrl
             });
-          } catch (e) {
-            addDebug(`Error loading content ${doc.id}: ${e.message}`);
+            
+            addDebug(`Loaded content: ${doc.id}`);
+          } catch (err) {
+            addDebug(`Error loading content ${doc.id}: ${err.message}`);
           }
         }
 
         setArContent(content);
-        addDebug(`Loaded ${content.length} AR items`);
+        addDebug(`Successfully loaded ${content.length} AR items`);
       } catch (error) {
-        setError(`Content loading error: ${error.message}`);
-        addDebug(`Content loading error: ${error.message}`);
+        setError(`Failed to load AR content: ${error.message}`);
+        addDebug(`AR content load error: ${error.message}`);
       }
     };
 
     loadContent();
-  }, [addDebug]);
-  // Image matching function
-  const matchImage = useCallback(async (tensor) => {
-    if (!modelRef.current || !tensor) return null;
-    
+  }, [isModelLoading, addDebug]);
+
+  // Extract features from image
+  const extractFeatures = useCallback(async (imageElement) => {
+    if (!mobilenetRef.current) return null;
+
     try {
-      const predictions = await modelRef.current.executeAsync(tensor.expandDims(0));
-      const scores = predictions[5].dataSync();
-      const boxes = predictions[1].dataSync();
+      const tensor = tf.tidy(() => {
+        return tf.browser.fromPixels(imageElement)
+          .resizeBilinear([224, 224])
+          .toFloat()
+          .expandDims(0)
+          .div(255.0);
+      });
+
+      const features = await mobilenetRef.current.predict(tensor).data();
+      tensor.dispose();
       
-      // Cleanup tensors
-      predictions.forEach(t => t.dispose());
-      
-      // Find best match
-      let bestMatch = { score: 0, box: null };
-      for (let i = 0; i < scores.length; i++) {
-        if (scores[i] > bestMatch.score) {
-          bestMatch = {
-            score: scores[i],
-            box: [
-              boxes[i * 4],
-              boxes[i * 4 + 1],
-              boxes[i * 4 + 2],
-              boxes[i * 4 + 3]
-            ]
-          };
-        }
-      }
-      
-      return bestMatch.score > 0.5 ? bestMatch : null;
+      return features;
     } catch (error) {
-      addDebug(`Matching error: ${error.message}`);
+      addDebug(`Feature extraction error: ${error.message}`);
       return null;
     }
   }, [addDebug]);
 
-  // Frame processing
+  // Compare features between images
+  const compareFeatures = useCallback((features1, features2) => {
+    if (!features1 || !features2) return 0;
+    
+    try {
+      let dotProduct = 0;
+      let norm1 = 0;
+      let norm2 = 0;
+      
+      for (let i = 0; i < features1.length; i++) {
+        dotProduct += features1[i] * features2[i];
+        norm1 += features1[i] * features1[i];
+        norm2 += features2[i] * features2[i];
+      }
+      
+      return dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2));
+    } catch (error) {
+      addDebug(`Comparison error: ${error.message}`);
+      return 0;
+    }
+  }, [addDebug]);
+  // Process video frame
   const processFrame = useCallback(async () => {
-    if (!canvasRef.current || !videoRef.current) return;
+    if (!canvasRef.current || !videoRef.current) return null;
 
     try {
       const context = canvasRef.current.getContext('2d');
@@ -198,37 +215,62 @@ const ARViewer = () => {
       canvasRef.current.height = videoRef.current.videoHeight;
       context.drawImage(videoRef.current, 0, 0);
 
-      const tensor = window.tf.browser.fromPixels(canvasRef.current);
-      const match = await matchImage(tensor);
-      tensor.dispose();
+      const frameFeatures = await extractFeatures(canvasRef.current);
+      if (!frameFeatures) return null;
 
-      if (match) {
-        const { box } = match;
-        return {
-          x: Math.round(box[1] * canvasRef.current.width),
-          y: Math.round(box[0] * canvasRef.current.height),
-          width: Math.round((box[3] - box[1]) * canvasRef.current.width),
-          height: Math.round((box[2] - box[0]) * canvasRef.current.height)
-        };
+      for (const content of arContent) {
+        try {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          
+          await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = reject;
+            img.src = content.imageUrl;
+          });
+
+          const referenceFeatures = await extractFeatures(img);
+          if (!referenceFeatures) continue;
+
+          const similarity = compareFeatures(frameFeatures, referenceFeatures);
+          addDebug(`Similarity with ${content.id}: ${similarity.toFixed(3)}`);
+
+          if (similarity > 0.7) {
+            return {
+              content,
+              bbox: {
+                x: 0,
+                y: 0,
+                width: canvasRef.current.width,
+                height: canvasRef.current.height
+              }
+            };
+          }
+        } catch (error) {
+          addDebug(`Error matching content ${content.id}: ${error.message}`);
+          continue;
+        }
       }
-      
+
       return null;
     } catch (error) {
-      addDebug(`Processing error: ${error.message}`);
+      addDebug(`Frame processing error: ${error.message}`);
       return null;
     }
-  }, [matchImage, addDebug]);
+  }, [extractFeatures, compareFeatures, arContent, addDebug]);
 
-  // Scanning function
+  // Main scanning function
   const scanFrame = useCallback(async () => {
     if (!isScanning) return;
 
     try {
-      const bbox = await processFrame();
+      const result = await processFrame();
       
-      if (bbox) {
-        if (!currentMatch && arContent.length > 0) {
-          setCurrentMatch(arContent[0]);
+      if (result) {
+        const { content, bbox } = result;
+        
+        if (!currentMatch) {
+          setCurrentMatch(content);
           if (overlayVideoRef.current) {
             overlayVideoRef.current.style.display = 'block';
             overlayVideoRef.current.style.transform = 
@@ -250,9 +292,9 @@ const ARViewer = () => {
     }
 
     rafRef.current = requestAnimationFrame(scanFrame);
-  }, [isScanning, processFrame, currentMatch, arContent, addDebug]);
+  }, [isScanning, processFrame, currentMatch, addDebug]);
 
-  // Handle scanning state
+  // Handle scanning state changes
   useEffect(() => {
     if (isScanning) {
       scanFrame();
@@ -273,14 +315,15 @@ const ARViewer = () => {
       }
     };
   }, [isScanning, scanFrame]);
-
   return (
     <div className="flex flex-col items-center min-h-screen bg-gray-100 p-4">
       <div className="w-full max-w-2xl bg-white rounded-lg shadow-lg p-6">
         <h1 className="text-2xl font-bold text-center mb-6">AR Image Scanner</h1>
         
         {error && (
-          <Alert>{error}</Alert>
+          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+            {error}
+          </div>
         )}
 
         <div className="relative w-full aspect-video bg-black rounded-lg overflow-hidden">
