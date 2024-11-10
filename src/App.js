@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
+import * as tf from '@tensorflow/tfjs';
+import * as mobilenet from '@tensorflow-models/mobilenet';
 import './App.css';
 
 const firebaseConfig = {
@@ -13,228 +15,236 @@ const firebaseConfig = {
   measurementId: "G-N5Q9K9G3JN"
 };
 
-// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
+const SIMILARITY_THRESHOLD = 0.7;
+
 function App() {
   const [isLoading, setIsLoading] = useState(true);
+  const [showMessage, setShowMessage] = useState(true);
   const [currentContent, setCurrentContent] = useState(null);
-  const [imageLoaded, setImageLoaded] = useState(false);
-  const [debugMessage, setDebugMessage] = useState('');
-  const [cameraActive, setCameraActive] = useState(false);
+  const [model, setModel] = useState(null);
+  const [targetFeatures, setTargetFeatures] = useState(null);
 
   const videoRef = useRef(null);
+  const sourceImageRef = useRef(null);
   const arVideoRef = useRef(null);
-  const targetImageRef = useRef(null);
-  const canvasRef = useRef(null);
+  const requestRef = useRef(null);
   const streamRef = useRef(null);
+
+  const loadTargetImage = useCallback(async (imageUrl) => {
+    try {
+      // Load and store target image
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = imageUrl;
+      });
+      sourceImageRef.current = img;
+
+      // Get features from target image
+      if (model) {
+        const targetTensor = tf.browser.fromPixels(img);
+        const features = await model.infer(targetTensor, true);
+        setTargetFeatures(features);
+        targetTensor.dispose();
+      }
+    } catch (error) {
+      console.error('Error loading target image:', error);
+    }
+  }, [model]);
+
+  const compareFeaturesWithTarget = useCallback((frameFeatures, targetFeatures) => {
+    return tf.tidy(() => {
+      // Calculate cosine similarity
+      const a = frameFeatures.reshape([1, -1]);
+      const b = targetFeatures.reshape([1, -1]);
+      const normA = a.norm();
+      const normB = b.norm();
+      const similarity = a.matMul(b.transpose()).div(normA.mul(normB));
+      return similarity.dataSync()[0];
+    });
+  }, []);
+
+  const detectFrame = useCallback(async () => {
+    if (!videoRef.current || !model || !targetFeatures || !sourceImageRef.current) return;
+
+    try {
+      // Get current frame
+      const videoTensor = tf.browser.fromPixels(videoRef.current);
+      
+      // Get features from current frame
+      const frameFeatures = await model.infer(videoTensor, true);
+      
+      // Compare features
+      const similarity = await compareFeaturesWithTarget(frameFeatures, targetFeatures);
+
+      if (similarity > SIMILARITY_THRESHOLD) {
+        setShowMessage(false);
+        if (arVideoRef.current) {
+          const videoElement = arVideoRef.current;
+          videoElement.style.display = 'block';
+          
+          if (videoElement.paused) {
+            videoElement.play().catch(console.error);
+          }
+        }
+      } else {
+        setShowMessage(true);
+        if (arVideoRef.current) {
+          arVideoRef.current.style.display = 'none';
+          arVideoRef.current.pause();
+        }
+      }
+
+      // Cleanup
+      videoTensor.dispose();
+      frameFeatures.dispose();
+    } catch (error) {
+      console.error('Detection error:', error);
+    }
+
+    // Continue detection
+    requestRef.current = requestAnimationFrame(detectFrame);
+  }, [model, targetFeatures, compareFeaturesWithTarget]);
 
   const initializeCamera = useCallback(async () => {
     try {
-      const constraints = {
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: 'environment',
           width: { ideal: 1280 },
           height: { ideal: 720 }
         }
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      });
+      
       streamRef.current = stream;
-
+      
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await new Promise((resolve) => {
-          videoRef.current.onloadedmetadata = () => {
-            videoRef.current.play();
-            resolve();
-          };
+          videoRef.current.onloadedmetadata = resolve;
         });
-        setCameraActive(true);
-        setDebugMessage('Camera active and streaming');
       }
     } catch (error) {
-      setDebugMessage(`Camera error: ${error.message}`);
-      console.error('Camera error:', error);
+      console.error('Camera access error:', error);
     }
   }, []);
 
-  // Initialize Camera
-  useEffect(() => {
-    const init = async () => {
-      try {
-        await initializeCamera();
-        setIsLoading(false);
-      } catch (error) {
-        setDebugMessage(`Initialization error: ${error.message}`);
-        setIsLoading(false);
-      }
-    };
-
-    init();
-
-    return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
-      }
-    };
-  }, [initializeCamera]);
-
-  const loadTargetImage = useCallback(async (imageUrl) => {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        targetImageRef.current = img;
-        setImageLoaded(true);
-        setDebugMessage('Target image loaded');
-        resolve(img);
-      };
-      img.onerror = (err) => {
-        setDebugMessage(`Error loading image: ${err.message}`);
-        reject(err);
-      };
-      img.src = imageUrl;
-    });
-  }, []);
-
-  // Firebase listener
-  useEffect(() => {
+  const setupFirebaseListener = useCallback(() => {
     const q = query(
       collection(db, 'arContent'),
       orderBy('timestamp', 'desc'),
       limit(1)
     );
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      snapshot.docChanges().forEach((change) => {
-        if (change.type === "added" || change.type === "modified") {
-          const data = change.doc.data();
-          setCurrentContent(data);
-          loadTargetImage(data.imageUrl).catch(console.error);
-        }
-      });
-    });
-
-    return () => unsubscribe();
-  }, [loadTargetImage]);
-
-  const compareImages = useCallback(() => {
-    if (!videoRef.current || !targetImageRef.current || !canvasRef.current) return;
-    if (!videoRef.current.videoWidth) return; // Make sure video is playing
-
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    
-    // Set canvas size to match video
-    canvas.width = videoRef.current.videoWidth;
-    canvas.height = videoRef.current.videoHeight;
-    
-    try {
-      // Draw current frame
-      ctx.drawImage(videoRef.current, 0, 0);
-      
-      // Get frame data
-      const frameData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      
-      // Create a new canvas for target image
-      const targetCanvas = document.createElement('canvas');
-      targetCanvas.width = canvas.width;
-      targetCanvas.height = canvas.height;
-      const targetCtx = targetCanvas.getContext('2d');
-      
-      // Draw and scale target image
-      targetCtx.drawImage(targetImageRef.current, 0, 0, canvas.width, canvas.height);
-      const targetData = targetCtx.getImageData(0, 0, canvas.width, canvas.height);
-
-      // Compare pixel data with tolerance
-      let matches = 0;
-      let totalPixels = frameData.data.length / 4;
-      const tolerance = 50; // Increase for more lenient matching
-      
-      for (let i = 0; i < frameData.data.length; i += 4) {
-        const isMatch = 
-          Math.abs(frameData.data[i] - targetData.data[i]) < tolerance && // Red
-          Math.abs(frameData.data[i + 1] - targetData.data[i + 1]) < tolerance && // Green
-          Math.abs(frameData.data[i + 2] - targetData.data[i + 2]) < tolerance; // Blue
+    return onSnapshot(q, async (snapshot) => {
+      const changes = snapshot.docChanges();
+      if (changes.length > 0) {
+        const data = changes[0].doc.data();
+        setCurrentContent(data);
         
-        if (isMatch) matches++;
-      }
-
-      const matchPercentage = (matches / totalPixels) * 100;
-      setDebugMessage(`Match: ${matchPercentage.toFixed(1)}% - Camera Active: ${cameraActive}`);
-
-      // Lower threshold for more lenient matching
-      if (matchPercentage > 20) {
-        if (arVideoRef.current) {
-          arVideoRef.current.style.display = 'block';
-          if (arVideoRef.current.paused) {
-            arVideoRef.current.play().catch(console.error);
-          }
-        }
-      } else {
-        if (arVideoRef.current) {
-          arVideoRef.current.style.display = 'none';
-          arVideoRef.current.pause();
+        if (data.imageUrl) {
+          await loadTargetImage(data.imageUrl);
         }
       }
+    });
+  }, [loadTargetImage]); // Added loadTargetImage to dependencies
+
+  const initializeApp = useCallback(async () => {
+    try {
+      // Load TensorFlow model
+      await tf.ready();
+      const loadedModel = await mobilenet.load();
+      setModel(loadedModel);
+
+      // Initialize camera
+      await initializeCamera();
+      
+      // Set up Firebase listener
+      setupFirebaseListener();
+      
+      setIsLoading(false);
     } catch (error) {
-      console.error('Comparison error:', error);
-      setDebugMessage(`Comparison error: ${error.message}`);
+      console.error('Initialization error:', error);
+      setIsLoading(false);
     }
-  }, [cameraActive]);
+  }, [initializeCamera, setupFirebaseListener]);
 
-  // Image comparison interval
   useEffect(() => {
-    let intervalId;
-    if (imageLoaded && cameraActive) {
-      intervalId = setInterval(compareImages, 500);
-    }
+    initializeApp();
+    
     return () => {
-      if (intervalId) {
-        clearInterval(intervalId);
+      // Clean up requestAnimationFrame
+      if (requestRef.current) {
+        cancelAnimationFrame(requestRef.current);
+      }
+      
+      // Clean up media stream
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
       }
     };
-  }, [imageLoaded, cameraActive, compareImages]);
+  }, [initializeApp]);
+
+  useEffect(() => {
+    if (model && targetFeatures) {
+      detectFrame();
+      return () => {
+        if (requestRef.current) {
+          cancelAnimationFrame(requestRef.current);
+        }
+      };
+    }
+  }, [model, targetFeatures, detectFrame]);
 
   if (isLoading) {
-    return <div className="loading">Loading camera...</div>;
+    return (
+      <div className="loading-screen">
+        <div className="loading-spinner"></div>
+        <p>Loading AR Experience...</p>
+      </div>
+    );
   }
 
   return (
     <div className="ar-container">
+      {showMessage && (
+        <div className="overlay-message">
+          Point your camera at the target image
+        </div>
+      )}
+
       <video
         ref={videoRef}
+        className="camera-feed"
         autoPlay
         playsInline
         muted
-        className="camera-feed"
-        onError={(e) => setDebugMessage(`Video error: ${e.message}`)}
-      />
-      
-      <canvas
-        ref={canvasRef}
-        className="debug-canvas"
       />
 
       {currentContent && (
         <video
           ref={arVideoRef}
+          className="ar-video"
           src={currentContent.videoUrl}
           playsInline
           loop
           muted
-          className="ar-video"
-          style={{ display: 'none' }}
-          onError={(e) => setDebugMessage(`AR video error: ${e.message}`)}
+          style={{
+            position: 'fixed',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            maxWidth: '80vw',
+            maxHeight: '80vh',
+            display: 'none'
+          }}
         />
       )}
-
-      <div className="debug-overlay">
-        {debugMessage}
-      </div>
     </div>
   );
 }
