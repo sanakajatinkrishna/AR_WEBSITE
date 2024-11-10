@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
-import * as tf from '@tensorflow/tfjs';
 import './App.css';
 
 const firebaseConfig = {
@@ -23,6 +22,7 @@ function App() {
   const [currentContent, setCurrentContent] = useState(null);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [debugMessage, setDebugMessage] = useState('');
+  const [cameraActive, setCameraActive] = useState(false);
 
   const videoRef = useRef(null);
   const arVideoRef = useRef(null);
@@ -32,30 +32,38 @@ function App() {
 
   const initializeCamera = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const constraints = {
         video: {
           facingMode: 'environment',
           width: { ideal: 1280 },
           height: { ideal: 720 }
         }
-      });
+      };
 
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        await new Promise((resolve) => {
+          videoRef.current.onloadedmetadata = () => {
+            videoRef.current.play();
+            resolve();
+          };
+        });
+        setCameraActive(true);
+        setDebugMessage('Camera active and streaming');
       }
-      setDebugMessage('Camera initialized');
     } catch (error) {
-      setDebugMessage(`Camera initialization error: ${error.message}`);
+      setDebugMessage(`Camera error: ${error.message}`);
+      console.error('Camera error:', error);
     }
   }, []);
 
-  // Initialize TensorFlow and Camera
+  // Initialize Camera
   useEffect(() => {
     const init = async () => {
       try {
-        await tf.ready();
-        setDebugMessage('TensorFlow loaded');
         await initializeCamera();
         setIsLoading(false);
       } catch (error) {
@@ -66,7 +74,6 @@ function App() {
 
     init();
 
-    // Cleanup function
     return () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
@@ -75,18 +82,22 @@ function App() {
     };
   }, [initializeCamera]);
 
-  const loadTargetImage = useCallback((imageUrl) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      targetImageRef.current = img;
-      setImageLoaded(true);
-      setDebugMessage('Target image loaded');
-    };
-    img.onerror = (err) => {
-      setDebugMessage(`Error loading image: ${err.message}`);
-    };
-    img.src = imageUrl;
+  const loadTargetImage = useCallback(async (imageUrl) => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        targetImageRef.current = img;
+        setImageLoaded(true);
+        setDebugMessage('Target image loaded');
+        resolve(img);
+      };
+      img.onerror = (err) => {
+        setDebugMessage(`Error loading image: ${err.message}`);
+        reject(err);
+      };
+      img.src = imageUrl;
+    });
   }, []);
 
   // Firebase listener
@@ -102,8 +113,7 @@ function App() {
         if (change.type === "added" || change.type === "modified") {
           const data = change.doc.data();
           setCurrentContent(data);
-          loadTargetImage(data.imageUrl);
-          setDebugMessage('Content loaded from Firebase');
+          loadTargetImage(data.imageUrl).catch(console.error);
         }
       });
     });
@@ -113,9 +123,10 @@ function App() {
 
   const compareImages = useCallback(() => {
     if (!videoRef.current || !targetImageRef.current || !canvasRef.current) return;
+    if (!videoRef.current.videoWidth) return; // Make sure video is playing
 
     const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     
     // Set canvas size to match video
     canvas.width = videoRef.current.videoWidth;
@@ -125,35 +136,43 @@ function App() {
       // Draw current frame
       ctx.drawImage(videoRef.current, 0, 0);
       
-      // Get image data
+      // Get frame data
       const frameData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       
-      // Draw target image
-      ctx.drawImage(targetImageRef.current, 0, 0, canvas.width, canvas.height);
-      const targetData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      // Create a new canvas for target image
+      const targetCanvas = document.createElement('canvas');
+      targetCanvas.width = canvas.width;
+      targetCanvas.height = canvas.height;
+      const targetCtx = targetCanvas.getContext('2d');
+      
+      // Draw and scale target image
+      targetCtx.drawImage(targetImageRef.current, 0, 0, canvas.width, canvas.height);
+      const targetData = targetCtx.getImageData(0, 0, canvas.width, canvas.height);
 
-      // Compare pixel data
+      // Compare pixel data with tolerance
       let matches = 0;
       let totalPixels = frameData.data.length / 4;
+      const tolerance = 50; // Increase for more lenient matching
       
       for (let i = 0; i < frameData.data.length; i += 4) {
         const isMatch = 
-          Math.abs(frameData.data[i] - targetData.data[i]) < 50 && // Red
-          Math.abs(frameData.data[i + 1] - targetData.data[i + 1]) < 50 && // Green
-          Math.abs(frameData.data[i + 2] - targetData.data[i + 2]) < 50; // Blue
+          Math.abs(frameData.data[i] - targetData.data[i]) < tolerance && // Red
+          Math.abs(frameData.data[i + 1] - targetData.data[i + 1]) < tolerance && // Green
+          Math.abs(frameData.data[i + 2] - targetData.data[i + 2]) < tolerance; // Blue
         
         if (isMatch) matches++;
       }
 
       const matchPercentage = (matches / totalPixels) * 100;
-      setDebugMessage(`Match percentage: ${matchPercentage.toFixed(2)}%`);
+      setDebugMessage(`Match: ${matchPercentage.toFixed(1)}% - Camera Active: ${cameraActive}`);
 
-      if (matchPercentage > 30) {
-        if (arVideoRef.current && arVideoRef.current.paused) {
+      // Lower threshold for more lenient matching
+      if (matchPercentage > 20) {
+        if (arVideoRef.current) {
           arVideoRef.current.style.display = 'block';
-          arVideoRef.current.play().catch(err => {
-            setDebugMessage(`Video play error: ${err.message}`);
-          });
+          if (arVideoRef.current.paused) {
+            arVideoRef.current.play().catch(console.error);
+          }
         }
       } else {
         if (arVideoRef.current) {
@@ -162,14 +181,15 @@ function App() {
         }
       }
     } catch (error) {
+      console.error('Comparison error:', error);
       setDebugMessage(`Comparison error: ${error.message}`);
     }
-  }, []);
+  }, [cameraActive]);
 
   // Image comparison interval
   useEffect(() => {
     let intervalId;
-    if (imageLoaded) {
+    if (imageLoaded && cameraActive) {
       intervalId = setInterval(compareImages, 500);
     }
     return () => {
@@ -177,10 +197,10 @@ function App() {
         clearInterval(intervalId);
       }
     };
-  }, [imageLoaded, compareImages]);
+  }, [imageLoaded, cameraActive, compareImages]);
 
   if (isLoading) {
-    return <div>Loading...</div>;
+    return <div className="loading">Loading camera...</div>;
   }
 
   return (
@@ -196,7 +216,7 @@ function App() {
       
       <canvas
         ref={canvasRef}
-        style={{ display: 'none' }}
+        className="debug-canvas"
       />
 
       {currentContent && (
