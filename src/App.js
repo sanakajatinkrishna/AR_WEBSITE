@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
+import * as tf from '@tensorflow/tfjs';
+import * as mobilenet from '@tensorflow-models/mobilenet';
 import './App.css';
 
-// Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -14,166 +15,237 @@ const firebaseConfig = {
   measurementId: "G-N5Q9K9G3JN"
 };
 
-// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
+const SIMILARITY_THRESHOLD = 0.7;
+
 function App() {
   const [isLoading, setIsLoading] = useState(true);
-  const [hasPermission, setHasPermission] = useState(false);
+  const [showMessage, setShowMessage] = useState(true);
   const [currentContent, setCurrentContent] = useState(null);
-  const [errorMessage, setErrorMessage] = useState(null);
+  const [model, setModel] = useState(null);
+  const [targetFeatures, setTargetFeatures] = useState(null);
 
-  useEffect(() => {
-    // Request camera permission first
-    const requestCameraPermission = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        setHasPermission(true);
-        // Stop the stream as AR.js will handle it
-        stream.getTracks().forEach(track => track.stop());
-      } catch (err) {
-        console.error('Camera permission error:', err);
-        setErrorMessage('Please allow camera access to use AR features');
-        setHasPermission(false);
+  const videoRef = useRef(null);
+  const sourceImageRef = useRef(null);
+  const arVideoRef = useRef(null);
+  const requestRef = useRef(null);
+  const streamRef = useRef(null);
+
+  const loadTargetImage = useCallback(async (imageUrl) => {
+    try {
+      // Load and store target image
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = imageUrl;
+      });
+      sourceImageRef.current = img;
+
+      // Get features from target image
+      if (model) {
+        const targetTensor = tf.browser.fromPixels(img);
+        const features = await model.infer(targetTensor, true);
+        setTargetFeatures(features);
+        targetTensor.dispose();
       }
-    };
+    } catch (error) {
+      console.error('Error loading target image:', error);
+    }
+  }, [model]);
 
-    requestCameraPermission();
+  const compareFeaturesWithTarget = useCallback((frameFeatures, targetFeatures) => {
+    return tf.tidy(() => {
+      // Calculate cosine similarity
+      const a = frameFeatures.reshape([1, -1]);
+      const b = targetFeatures.reshape([1, -1]);
+      const normA = a.norm();
+      const normB = b.norm();
+      const similarity = a.matMul(b.transpose()).div(normA.mul(normB));
+      return similarity.dataSync()[0];
+    });
   }, []);
 
-  useEffect(() => {
-    // Only load AR scripts after camera permission is granted
-    if (hasPermission) {
-      const loadARScripts = async () => {
-        try {
-          // Load Aframe first
-          const aframe = document.createElement('script');
-          aframe.src = 'https://aframe.io/releases/1.4.0/aframe.min.js';
-          document.head.appendChild(aframe);
+  const detectFrame = useCallback(async () => {
+    if (!videoRef.current || !model || !targetFeatures || !sourceImageRef.current) return;
 
-          await new Promise((resolve) => {
-            aframe.onload = resolve;
-          });
+    try {
+      // Get current frame
+      const videoTensor = tf.browser.fromPixels(videoRef.current);
+      
+      // Get features from current frame
+      const frameFeatures = await model.infer(videoTensor, true);
+      
+      // Compare features
+      const similarity = await compareFeaturesWithTarget(frameFeatures, targetFeatures);
 
-          // Then load AR.js
-          const arjs = document.createElement('script');
-          arjs.src = 'https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js';
-          document.head.appendChild(arjs);
-
-          arjs.onload = () => {
-            setIsLoading(false);
-            console.log('AR.js loaded successfully');
-          };
-        } catch (error) {
-          console.error('Error loading AR scripts:', error);
-          setErrorMessage('Failed to load AR components');
+      if (similarity > SIMILARITY_THRESHOLD) {
+        setShowMessage(false);
+        if (arVideoRef.current) {
+          const videoElement = arVideoRef.current;
+          videoElement.style.display = 'block';
+          
+          if (videoElement.paused) {
+            videoElement.play().catch(console.error);
+          }
         }
-      };
+      } else {
+        setShowMessage(true);
+        if (arVideoRef.current) {
+          arVideoRef.current.style.display = 'none';
+          arVideoRef.current.pause();
+        }
+      }
 
-      loadARScripts();
+      // Cleanup
+      videoTensor.dispose();
+      frameFeatures.dispose();
+    } catch (error) {
+      console.error('Detection error:', error);
     }
-  }, [hasPermission]);
 
-  useEffect(() => {
-    // Listen for Firebase updates
+    // Continue detection
+    requestRef.current = requestAnimationFrame(detectFrame);
+  }, [model, targetFeatures, compareFeaturesWithTarget]);
+
+  const initializeCamera = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      });
+      
+      streamRef.current = stream;
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await new Promise((resolve) => {
+          videoRef.current.onloadedmetadata = resolve;
+        });
+      }
+    } catch (error) {
+      console.error('Camera access error:', error);
+    }
+  }, []);
+
+  const setupFirebaseListener = useCallback(() => {
     const q = query(
       collection(db, 'arContent'),
       orderBy('timestamp', 'desc'),
       limit(1)
     );
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      snapshot.docChanges().forEach((change) => {
-        if (change.type === "added" || change.type === "modified") {
-          const data = change.doc.data();
-          console.log('New content received:', data);
-          setCurrentContent({
-            id: change.doc.id,
-            ...data
-          });
+    return onSnapshot(q, async (snapshot) => {
+      const changes = snapshot.docChanges();
+      if (changes.length > 0) {
+        const data = changes[0].doc.data();
+        setCurrentContent(data);
+        
+        if (data.imageUrl) {
+          await loadTargetImage(data.imageUrl);
         }
-      });
+      }
     });
+  }, [loadTargetImage]); // Added loadTargetImage to dependencies
 
-    return () => unsubscribe();
-  }, []);
+  const initializeApp = useCallback(async () => {
+    try {
+      // Load TensorFlow model
+      await tf.ready();
+      const loadedModel = await mobilenet.load();
+      setModel(loadedModel);
 
-  // Show loading screen
+      // Initialize camera
+      await initializeCamera();
+      
+      // Set up Firebase listener
+      setupFirebaseListener();
+      
+      setIsLoading(false);
+    } catch (error) {
+      console.error('Initialization error:', error);
+      setIsLoading(false);
+    }
+  }, [initializeCamera, setupFirebaseListener]);
+
+  useEffect(() => {
+    initializeApp();
+    
+    return () => {
+      // Clean up requestAnimationFrame
+      if (requestRef.current) {
+        cancelAnimationFrame(requestRef.current);
+      }
+      
+      // Clean up media stream
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [initializeApp]);
+
+  useEffect(() => {
+    if (model && targetFeatures) {
+      detectFrame();
+      return () => {
+        if (requestRef.current) {
+          cancelAnimationFrame(requestRef.current);
+        }
+      };
+    }
+  }, [model, targetFeatures, detectFrame]);
+
   if (isLoading) {
     return (
       <div className="loading-screen">
         <div className="loading-spinner"></div>
-        <p>Starting AR Camera...</p>
+        <p>Loading AR Experience...</p>
       </div>
     );
   }
 
-  // Show error message
-  if (errorMessage) {
-    return (
-      <div className="error-screen">
-        <h2>Error</h2>
-        <p>{errorMessage}</p>
-        <button onClick={() => window.location.reload()}>Try Again</button>
-      </div>
-    );
-  }
-
-  // Show AR scene
   return (
-    <>
-      <div className="ar-overlay">
-        <div className="status-message">
-          Point camera at the image
+    <div className="ar-container">
+      {showMessage && (
+        <div className="overlay-message">
+          Point your camera at the target image
         </div>
-      </div>
+      )}
 
-      <a-scene
-        embedded
-        arjs="sourceType: webcam; debugUIEnabled: false; detectionMode: mono_and_matrix;"
-        renderer="logarithmicDepthBuffer: true;"
-        vr-mode-ui="enabled: false"
-      >
-        {currentContent && (
-          <>
-            <a-assets>
-              <video
-                id="ar-video"
-                src={currentContent.videoUrl}
-                preload="auto"
-                loop
-                crossOrigin="anonymous"
-                playsInline
-                webkit-playsinline
-              ></video>
-            </a-assets>
+      <video
+        ref={videoRef}
+        className="camera-feed"
+        autoPlay
+        playsInline
+        muted
+      />
 
-            <a-marker
-              preset="pattern"
-              type="pattern"
-              url={currentContent.imageUrl}
-              smooth="true"
-              smoothCount="5"
-              smoothTolerance="0.01"
-              raycaster="objects: .clickable"
-              emitevents="true"
-              cursor="fuse: false; rayOrigin: mouse;"
-            >
-              <a-video
-                src="#ar-video"
-                position="0 0.1 0"
-                rotation="-90 0 0"
-                width="2"
-                height="1.5"
-              ></a-video>
-            </a-marker>
-          </>
-        )}
-
-        <a-entity camera></a-entity>
-      </a-scene>
-    </>
+      {currentContent && (
+        <video
+          ref={arVideoRef}
+          className="ar-video"
+          src={currentContent.videoUrl}
+          playsInline
+          loop
+          muted
+          style={{
+            position: 'fixed',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            maxWidth: '80vw',
+            maxHeight: '80vh',
+            display: 'none'
+          }}
+        />
+      )}
+    </div>
   );
 }
 
