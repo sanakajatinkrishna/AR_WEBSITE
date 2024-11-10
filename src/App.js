@@ -19,55 +19,76 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const storage = getStorage(app);
 
-// Load OpenCV
-const loadOpenCV = () => {
-  return new Promise((resolve) => {
-    const script = document.createElement('script');
-    script.src = 'https://docs.opencv.org/4.7.0/opencv.js';
-    script.async = true;
-    script.onload = () => {
-      if (window.cv && window.cv.Mat) {
-        resolve(window.cv);
-      }
-    };
-    document.body.appendChild(script);
-  });
+const TargetArea = ({ visible = true }) => (
+  <div className="absolute inset-0 z-20 pointer-events-none flex items-center justify-center">
+    <div className="relative">
+      {/* Target area frame */}
+      <div className="w-64 h-96 border-2 border-white rounded-lg relative">
+        {/* Corner indicators */}
+        <div className="absolute -left-2 -top-2 w-5 h-5 border-l-4 border-t-4 border-blue-500" />
+        <div className="absolute -right-2 -top-2 w-5 h-5 border-r-4 border-t-4 border-blue-500" />
+        <div className="absolute -left-2 -bottom-2 w-5 h-5 border-l-4 border-b-4 border-blue-500" />
+        <div className="absolute -right-2 -bottom-2 w-5 h-5 border-r-4 border-b-4 border-blue-500" />
+        
+        {/* Center crosshair */}
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="w-8 h-8">
+            <div className="absolute top-1/2 left-0 w-full h-0.5 bg-white opacity-50" />
+            <div className="absolute top-0 left-1/2 w-0.5 h-full bg-white opacity-50" />
+          </div>
+        </div>
+
+        {/* Instruction text */}
+        <div className="absolute -top-10 left-1/2 transform -translate-x-1/2 whitespace-nowrap">
+          <span className="bg-black bg-opacity-50 text-white px-3 py-1 rounded-full text-sm">
+            Place your image within the frame
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+const StatusMessage = ({ status }) => {
+  let message = '';
+  let bgColor = 'bg-yellow-500';
+
+  switch (status) {
+    case 'aligning':
+      message = 'Align image within the target area';
+      break;
+    case 'aligned':
+      message = 'Hold steady - Initializing AR';
+      bgColor = 'bg-blue-500';
+      break;
+    case 'playing':
+      message = 'AR Video Playing';
+      bgColor = 'bg-green-500';
+      break;
+    default:
+      return null;
+  }
+
+  return (
+    <div className={`absolute top-4 left-1/2 transform -translate-x-1/2 z-30 ${bgColor} px-4 py-2 rounded-full text-white text-sm`}>
+      {message}
+    </div>
+  );
 };
 
-const ImageTrackingARViewer = () => {
+const ARViewer = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const [cameraActive, setCameraActive] = useState(false);
-  const [imageDetected, setImageDetected] = useState(false);
+  const [targetLocked, setTargetLocked] = useState(false);
+  const [videoPlaying, setVideoPlaying] = useState(false);
+  const [status, setStatus] = useState('aligning');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [referenceImage, setReferenceImage] = useState(null);
-  const [cvReady, setCvReady] = useState(false);
-  const [videoLoaded, setVideoLoaded] = useState(false);
   const streamRef = useRef(null);
-  const animationFrameRef = useRef(null);
-  const detectorRef = useRef(null);
 
-  // Initialize OpenCV
-  useEffect(() => {
-    const initOpenCV = async () => {
-      try {
-        const cv = await loadOpenCV();
-        detectorRef.current = {
-          cv,
-          detector: new cv.ORB(),
-          matcher: new cv.BFMatcher(cv.NORM_HAMMING, true)
-        };
-        setCvReady(true);
-      } catch (err) {
-        setError('Failed to initialize image detection');
-      }
-    };
-    initOpenCV();
-  }, []);
-
-  // Start camera
+  // Initialize camera
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -81,174 +102,131 @@ const ImageTrackingARViewer = () => {
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        videoRef.current.play();
         setCameraActive(true);
-        startImageTracking();
+        setLoading(false);
+        initializeImageTracking();
       }
     } catch (err) {
       setError('Failed to access camera: ' + err.message);
+      setLoading(false);
     }
   };
 
-  // Process frames and detect image
-  const processFrame = (cv, videoElement, canvasElement, referenceImg) => {
-    const context = canvasElement.getContext('2d');
+  // Track image in target area
+  const initializeImageTracking = () => {
+    if (!canvasRef.current || !videoRef.current) return;
+
+    const canvas = canvasRef.current;
+    const context = canvas.getContext('2d');
     
     // Set canvas size to match video
-    canvasElement.width = videoElement.videoWidth;
-    canvasElement.height = videoElement.videoHeight;
-    
-    // Draw current frame
-    context.drawImage(videoElement, 0, 0);
-    
-    // Get current frame
-    const frame = cv.imread(canvasElement);
-    const frameGray = new cv.Mat();
-    cv.cvtColor(frame, frameGray, cv.COLOR_RGBA2GRAY);
-    
-    // Process reference image
-    const refImg = cv.imread(referenceImg);
-    const refGray = new cv.Mat();
-    cv.cvtColor(refImg, refGray, cv.COLOR_RGBA2GRAY);
-    
-    // Detect features
-    const kp1 = new cv.KeyPointVector();
-    const kp2 = new cv.KeyPointVector();
-    const desc1 = new cv.Mat();
-    const desc2 = new cv.Mat();
-    
-    detectorRef.current.detector.detect(frameGray, kp1);
-    detectorRef.current.detector.detect(refGray, kp2);
-    detectorRef.current.detector.compute(frameGray, kp1, desc1);
-    detectorRef.current.detector.compute(refGray, kp2, desc2);
-    
-    // Match features
-    const matches = detectorRef.current.matcher.match(desc1, desc2);
-    
-    // Filter good matches
-    const goodMatches = matches.filter(m => m.distance < 50);
-    
-    if (goodMatches.length > 15) {
-      // Get matched keypoints
-      const srcPoints = goodMatches.map(m => kp1.get(m.queryIdx).pt);
-      const dstPoints = goodMatches.map(m => kp2.get(m.trainIdx).pt);
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    // Define target area in center of screen
+    const targetArea = {
+      x: (canvas.width - 256) / 2,  // 256px = 16rem (w-64)
+      y: (canvas.height - 384) / 2, // 384px = 24rem (h-96)
+      width: 256,
+      height: 384
+    };
+
+    const processFrame = () => {
+      // Draw current camera frame
+      context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+
+      // Get image data from target area
+      const imageData = context.getImageData(
+        targetArea.x, 
+        targetArea.y, 
+        targetArea.width, 
+        targetArea.height
+      );
+
+      // Simple movement detection
+      const hasContent = detectImageContent(imageData);
       
-      // Find homography
-      const srcPointsMat = cv.matFromArray(srcPoints.length, 1, cv.CV_32FC2, 
-        srcPoints.flatMap(p => [p.x, p.y]));
-      const dstPointsMat = cv.matFromArray(dstPoints.length, 1, cv.CV_32FC2,
-        dstPoints.flatMap(p => [p.x, p.y]));
-        
-      const homography = cv.findHomography(srcPointsMat, dstPointsMat, cv.RANSAC, 5.0);
-      
-      // Draw video overlay
-      if (homography && overlayVideoRef.current) {
-        setImageDetected(true);
-        context.save();
-        
-        // Apply perspective transform
-        const matrix = homography.data64F;
-        context.transform(
-          matrix[0], matrix[3], matrix[1],
-          matrix[4], matrix[2], matrix[5]
-        );
-        
-        // Draw video over detected image
-        context.drawImage(
-          overlayVideoRef.current,
-          0, 0,
-          refImg.cols,
-          refImg.rows
-        );
-        
-        context.restore();
-        
-        // Start video if not playing
-        if (overlayVideoRef.current.paused) {
-          overlayVideoRef.current.play();
-        }
-      } else {
-        setImageDetected(false);
-        if (overlayVideoRef.current && !overlayVideoRef.current.paused) {
+      if (hasContent && !targetLocked) {
+        setStatus('aligned');
+        // Start a timer to ensure image is steady
+        setTimeout(() => {
+          setTargetLocked(true);
+          setStatus('playing');
+          playARVideo();
+        }, 1000);
+      } else if (!hasContent && targetLocked) {
+        setTargetLocked(false);
+        setVideoPlaying(false);
+        setStatus('aligning');
+        if (overlayVideoRef.current) {
           overlayVideoRef.current.pause();
         }
       }
-      
-      // Clean up matrices
-      homography.delete();
-      srcPointsMat.delete();
-      dstPointsMat.delete();
-    } else {
-      setImageDetected(false);
-      if (overlayVideoRef.current && !overlayVideoRef.current.paused) {
-        overlayVideoRef.current.pause();
-      }
+
+      // Continue processing frames
+      requestAnimationFrame(processFrame);
+    };
+
+    requestAnimationFrame(processFrame);
+  };
+
+  // Detect if there's meaningful content in the target area
+  const detectImageContent = (imageData) => {
+    const data = imageData.data;
+    let totalBrightness = 0;
+    let totalPixels = data.length / 4;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      totalBrightness += brightness;
     }
-    
-    // Clean up
-    frame.delete();
-    frameGray.delete();
-    refImg.delete();
-    refGray.delete();
-    desc1.delete();
-    desc2.delete();
-    kp1.delete();
-    kp2.delete();
-    
-    // Continue tracking
-    animationFrameRef.current = requestAnimationFrame(() => 
-      processFrame(cv, videoElement, canvasElement, referenceImg)
-    );
+
+    const averageBrightness = totalBrightness / totalPixels;
+    const hasContent = averageBrightness > 30 && averageBrightness < 225;
+
+    return hasContent;
   };
 
-  // Start image tracking
-  const startImageTracking = () => {
-    if (!videoRef.current || !canvasRef.current || !referenceImage || !detectorRef.current) return;
-    
-    processFrame(
-      detectorRef.current.cv,
-      videoRef.current,
-      canvasRef.current,
-      referenceImage
-    );
+  // Play AR video over detected image
+  const playARVideo = () => {
+    if (!overlayVideoRef.current || videoPlaying) return;
+
+    overlayVideoRef.current.play();
+    setVideoPlaying(true);
   };
 
-  // Load reference image and video
+  // Fetch video content
   useEffect(() => {
-    const fetchContent = async () => {
-      try {
-        const q = query(collection(db, 'arContent'), orderBy('timestamp', 'desc'), limit(1));
-        const unsubscribe = onSnapshot(q, async (snapshot) => {
-          if (!snapshot.empty) {
-            const doc = snapshot.docs[0];
-            const data = doc.data();
-            
-            // Load reference image
-            const imageUrl = await getDownloadURL(ref(storage, data.fileName.image));
-            const img = new Image();
-            img.crossOrigin = 'anonymous';
-            img.onload = () => setReferenceImage(img);
-            img.src = imageUrl;
-            
-            // Load video
+    const fetchARContent = () => {
+      const q = query(
+        collection(db, 'arContent'),
+        orderBy('timestamp', 'desc'),
+        limit(1)
+      );
+
+      return onSnapshot(q, async (snapshot) => {
+        if (!snapshot.empty) {
+          const doc = snapshot.docs[0];
+          const data = doc.data();
+          
+          try {
             const videoUrl = await getDownloadURL(ref(storage, data.fileName.video));
             if (overlayVideoRef.current) {
               overlayVideoRef.current.src = videoUrl;
-              overlayVideoRef.current.onloadeddata = () => setVideoLoaded(true);
+              overlayVideoRef.current.load();
             }
-            
+            setLoading(false);
+          } catch (error) {
+            setError('Failed to load video content');
             setLoading(false);
           }
-        });
-        
-        return unsubscribe;
-      } catch (err) {
-        setError('Failed to load content');
-        setLoading(false);
-      }
+        }
+      });
     };
-    
-    fetchContent();
+
+    const unsubscribe = fetchARContent();
+    return () => unsubscribe();
   }, []);
 
   // Cleanup
@@ -257,84 +235,72 @@ const ImageTrackingARViewer = () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-      if (detectorRef.current?.detector) {
-        detectorRef.current.detector.delete();
-      }
     };
   }, []);
 
   return (
     <div className="relative h-screen w-full overflow-hidden bg-black">
-      {/* Camera view canvas */}
-      <canvas
-        ref={canvasRef}
-        className="absolute inset-0 h-full w-full object-cover"
-      />
-      
-      {/* Hidden elements */}
+      {/* Main camera view */}
       <video
         ref={videoRef}
-        className="hidden"
         playsInline
         muted
-        autoPlay
+        className="absolute inset-0 h-full w-full object-cover"
       />
+
+      {/* AR overlay canvas */}
+      <canvas
+        ref={canvasRef}
+        className="absolute inset-0 z-10"
+      />
+
+      {/* Target area overlay */}
+      {cameraActive && !targetLocked && (
+        <TargetArea />
+      )}
+
+      {/* AR Video (positioned over target when active) */}
       <video
         ref={overlayVideoRef}
-        className="hidden"
+        className={`absolute z-20 ${targetLocked ? 'opacity-100' : 'opacity-0'}`}
+        style={{
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          width: '256px', // Match target area width
+          height: '384px', // Match target area height
+        }}
         playsInline
         loop
       />
-      
-      {/* Target guide */}
-      {cameraActive && !imageDetected && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
-          <div className="relative w-64 h-96 border-2 border-dashed border-white rounded-lg">
-            <div className="absolute -top-8 left-1/2 transform -translate-x-1/2 whitespace-nowrap">
-              <span className="bg-black bg-opacity-50 text-white px-3 py-1 rounded text-sm">
-                Show reference image here
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
-      
+
+      {/* Status message */}
+      <StatusMessage status={status} />
+
       {/* Loading state */}
       {loading && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black bg-opacity-50">
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
           <div className="text-white text-xl">Loading...</div>
         </div>
       )}
-      
+
       {/* Start button */}
-      {!cameraActive && !loading && cvReady && videoLoaded && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center">
+      {!cameraActive && !loading && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center">
           <button
             onClick={startCamera}
-            className="bg-blue-500 text-white px-6 py-3 rounded-lg text-lg hover:bg-blue-600"
+            className="bg-blue-500 text-white px-6 py-3 rounded-lg text-lg font-semibold hover:bg-blue-600"
           >
-            Start Camera
+            Start AR Experience
           </button>
         </div>
       )}
-      
+
       {/* Error message */}
       {error && (
-        <div className="absolute top-4 inset-x-0 z-20 flex justify-center">
-          <div className="bg-red-500 text-white px-4 py-2 rounded">
+        <div className="absolute top-4 left-0 right-0 z-50 flex justify-center">
+          <div className="bg-red-500 text-white px-4 py-2 rounded-lg">
             {error}
-          </div>
-        </div>
-      )}
-      
-      {/* Status message */}
-      {cameraActive && !imageDetected && (
-        <div className="absolute top-4 inset-x-0 z-20 flex justify-center">
-          <div className="bg-yellow-500 text-white px-4 py-2 rounded">
-            Show your image in the target area
           </div>
         </div>
       )}
@@ -342,4 +308,4 @@ const ImageTrackingARViewer = () => {
   );
 };
 
-export default ImageTrackingARViewer;
+export default ARViewer;
