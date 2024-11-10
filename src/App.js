@@ -9,22 +9,33 @@ const ARViewer = () => {
 
     const startCamera = async () => {
       try {
+        // Request camera with maximum resolution
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
-            width: { ideal: window.innerWidth },
-            height: { ideal: window.innerHeight }
+            width: { ideal: 4096 }, // Request max resolution
+            height: { ideal: 2160 }
           }
         });
 
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          await videoRef.current.play();
           
-          // Request fullscreen after video starts playing
-          if (containerRef.current && containerRef.current.requestFullscreen) {
-            containerRef.current.requestFullscreen();
-          }
+          // Wait for video to be ready
+          videoRef.current.onloadedmetadata = async () => {
+            try {
+              await videoRef.current.play();
+              
+              // Enter fullscreen mode
+              if (document.documentElement.requestFullscreen) {
+                await document.documentElement.requestFullscreen();
+              } else if (document.documentElement.webkitRequestFullscreen) {
+                await document.documentElement.webkitRequestFullscreen();
+              }
+            } catch (err) {
+              console.error('Error playing video:', err);
+            }
+          };
         }
       } catch (err) {
         console.error('Camera error:', err);
@@ -33,41 +44,38 @@ const ARViewer = () => {
 
     startCamera();
 
-    // Handle exit fullscreen
-    const handleFullscreenChange = () => {
-      if (!document.fullscreenElement && containerRef.current) {
-        containerRef.current.requestFullscreen().catch(err => {
-          console.error('Error attempting to enable fullscreen:', err);
-        });
-      }
-    };
-
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-
+    // Cleanup function
     return () => {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
     };
   }, []);
 
   return (
-    <div className="relative h-screen w-screen bg-black">
-      {/* Camera Container */}
-      <div ref={containerRef} className="absolute inset-0">
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className="h-full w-full object-cover"
-        />
-      </div>
+    <div 
+      ref={containerRef} 
+      className="fixed inset-0 w-full h-full bg-black overflow-hidden"
+    >
+      {/* Camera Feed */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className="absolute top-0 left-0 min-w-full min-h-full w-full h-full object-cover"
+      />
       
-      {/* Rectangle Overlay */}
-      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-        <div className="w-64 h-96 border-2 border-red-500 rounded-lg" />
+      {/* Centered Rectangle Overlay */}
+      <div className="absolute inset-0 flex items-center justify-center">
+        <div 
+          className="border-4 border-red-500 rounded-lg"
+          style={{
+            width: '70vmin',
+            height: '90vmin',
+            boxShadow: '0 0 0 2000px rgba(0, 0, 0, 0.3)'
+          }}
+        />
       </div>
     </div>
   );
