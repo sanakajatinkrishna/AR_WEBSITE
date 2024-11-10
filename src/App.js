@@ -22,15 +22,12 @@ const storage = getStorage(app);
 const TargetArea = ({ visible = true }) => (
   <div className="absolute inset-0 z-20 pointer-events-none flex items-center justify-center">
     <div className="relative">
-      {/* Target area frame with red border */}
       <div className="w-64 h-96 border-2 border-red-500 rounded-lg relative">
-        {/* Corner indicators in red */}
         <div className="absolute -left-2 -top-2 w-5 h-5 border-l-4 border-t-4 border-red-500" />
         <div className="absolute -right-2 -top-2 w-5 h-5 border-r-4 border-t-4 border-red-500" />
         <div className="absolute -left-2 -bottom-2 w-5 h-5 border-l-4 border-b-4 border-red-500" />
         <div className="absolute -right-2 -bottom-2 w-5 h-5 border-r-4 border-b-4 border-red-500" />
         
-        {/* Center crosshair */}
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="w-8 h-8">
             <div className="absolute top-1/2 left-0 w-full h-0.5 bg-red-500 opacity-50" />
@@ -38,7 +35,6 @@ const TargetArea = ({ visible = true }) => (
           </div>
         </div>
 
-        {/* Instruction text */}
         <div className="absolute -top-10 left-1/2 transform -translate-x-1/2 whitespace-nowrap">
           <span className="bg-black bg-opacity-50 text-white px-3 py-1 rounded-full text-sm">
             Place your image within the frame
@@ -126,7 +122,6 @@ const ARViewer = () => {
     requestAnimationFrame(processFrame);
   }, [detectImageContent, playARVideo, targetLocked]);
 
-  // Auto-start camera on component mount
   useEffect(() => {
     const startCamera = async () => {
       try {
@@ -190,14 +185,15 @@ const ARViewer = () => {
 
   return (
     <div className="relative h-screen w-full overflow-hidden bg-black">
-      {/* Main camera view */}
+      {/* Hidden video element for camera feed */}
       <video
         ref={videoRef}
         playsInline
-        className="absolute inset-0 h-full w-full object-cover"
+        className="hidden"
+        style={{ display: 'none' }}
       />
 
-      {/* AR overlay canvas */}
+      {/* Canvas for displaying camera feed */}
       <canvas
         ref={canvasRef}
         className="absolute inset-0 z-10"
@@ -207,22 +203,21 @@ const ARViewer = () => {
       {!targetLocked && <TargetArea />}
 
       {/* AR Video */}
-      <video
-        ref={overlayVideoRef}
-        className={`absolute z-20 ${targetLocked ? 'opacity-100' : 'opacity-0'}`}
-        style={{
-          top: '50%',
-          left: '50%',
-          transform: 'translate(-50%, -50%)',
-          width: '100%',
-          height: 'auto',
-          maxWidth: '90vw',
-          maxHeight: '90vh',
-          objectFit: 'contain'
-        }}
-        playsInline
-        loop
-      />
+      {targetLocked && (
+        <video
+          ref={overlayVideoRef}
+          className="absolute z-20"
+          style={{
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: '256px',  // Match target area width
+            height: '384px'  // Match target area height
+          }}
+          playsInline
+          loop
+        />
+      )}
 
       {/* Error message */}
       {error && (
