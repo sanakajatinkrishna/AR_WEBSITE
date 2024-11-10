@@ -6,7 +6,6 @@ const ARViewer = () => {
 
   useEffect(() => {
     let stream = null;
-
     const startCamera = async () => {
       try {
         // Request camera access
@@ -17,14 +16,12 @@ const ARViewer = () => {
             height: { ideal: window.innerHeight }
           }
         });
-
+        
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          
           videoRef.current.onloadedmetadata = async () => {
             try {
               await videoRef.current.play();
-              
               // Request fullscreen
               if (containerRef.current && containerRef.current.requestFullscreen) {
                 await containerRef.current.requestFullscreen();
@@ -53,7 +50,7 @@ const ARViewer = () => {
   }, []);
 
   return (
-    <div 
+    <div
       ref={containerRef}
       className="fixed top-0 left-0 right-0 bottom-0 w-screen h-screen bg-black"
       style={{
@@ -78,18 +75,20 @@ const ARViewer = () => {
       
       {/* Rectangle Overlay */}
       <div 
-        className="absolute top-0 left-0 right-0 bottom-0 flex items-center justify-center pointer-events-none"
+        className="absolute inset-0 flex items-center justify-center"
         style={{
           position: 'absolute',
-          zIndex: 10
+          zIndex: 20,
+          pointerEvents: 'none'
         }}
       >
-        <div 
-          className="border-8 border-red-500"
+        <div
           style={{
             width: '80vw',
             height: '60vh',
-            borderRadius: '8px'
+            border: '8px solid #ef4444',
+            borderRadius: '8px',
+            backgroundColor: 'transparent'
           }}
         />
       </div>
