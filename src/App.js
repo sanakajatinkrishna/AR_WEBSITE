@@ -9,6 +9,7 @@ const ARViewer = () => {
     
     const startCamera = async () => {
       try {
+        // Request camera with full screen resolution
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
@@ -22,10 +23,11 @@ const ARViewer = () => {
           videoRef.current.onloadedmetadata = async () => {
             try {
               await videoRef.current.play();
-              if (containerRef.current?.requestFullscreen) {
-                await containerRef.current.requestFullscreen();
-              } else if (containerRef.current?.webkitRequestFullscreen) {
-                await containerRef.current.webkitRequestFullscreen();
+              // Request fullscreen mode
+              if (document.documentElement.requestFullscreen) {
+                await document.documentElement.requestFullscreen();
+              } else if (document.documentElement.webkitRequestFullscreen) {
+                await document.documentElement.webkitRequestFullscreen();
               }
             } catch (err) {
               console.error('Error starting video:', err);
@@ -43,29 +45,36 @@ const ARViewer = () => {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
+      // Exit fullscreen on cleanup
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
+      }
     };
   }, []);
 
   return (
     <div 
       ref={containerRef}
-      className="fixed inset-0 w-screen h-screen bg-black"
+      className="relative w-screen h-screen overflow-hidden bg-black"
     >
+      {/* Full screen video */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        className="absolute inset-0 w-full h-full object-cover"
+        className="absolute inset-0 min-w-full min-h-full w-auto h-auto object-cover"
       />
       
-      {/* Rectangle Overlay */}
-      <div className="absolute inset-0 flex items-center justify-center">
+      {/* Centered rectangle overlay */}
+      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
         <div 
-          className="border-8 border-red-500 rounded-lg"
+          className="border-4 border-red-500 rounded-lg"
           style={{
-            width: '80vw',
-            height: '60vh'
+            width: '300px',  // Fixed width instead of viewport units
+            height: '200px'  // Fixed height instead of viewport units
           }}
         />
       </div>
