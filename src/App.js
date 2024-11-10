@@ -19,42 +19,27 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const storage = getStorage(app);
 
-const TargetArea = ({ visible = true }) => (
+const TargetArea = () => (
   <div className="absolute inset-0 z-20 pointer-events-none flex items-center justify-center">
     <div className="relative">
-      <div className="w-64 h-96 border-2 border-red-500 rounded-lg relative">
-        <div className="absolute -left-2 -top-2 w-5 h-5 border-l-4 border-t-4 border-red-500" />
-        <div className="absolute -right-2 -top-2 w-5 h-5 border-r-4 border-t-4 border-red-500" />
-        <div className="absolute -left-2 -bottom-2 w-5 h-5 border-l-4 border-b-4 border-red-500" />
-        <div className="absolute -right-2 -bottom-2 w-5 h-5 border-r-4 border-b-4 border-red-500" />
-        
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div className="w-8 h-8">
-            <div className="absolute top-1/2 left-0 w-full h-0.5 bg-red-500 opacity-50" />
-            <div className="absolute top-0 left-1/2 w-0.5 h-full bg-red-500 opacity-50" />
-          </div>
-        </div>
-
-        <div className="absolute -top-10 left-1/2 transform -translate-x-1/2 whitespace-nowrap">
-          <span className="bg-black bg-opacity-50 text-white px-3 py-1 rounded-full text-sm">
-            Place your image within the frame
-          </span>
-        </div>
-      </div>
+      <div className="w-64 h-96 border-4 border-red-500 rounded-lg relative" />
     </div>
   </div>
 );
 
 const ARViewer = () => {
   const videoRef = useRef(null);
-  const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const [targetLocked, setTargetLocked] = useState(false);
-  const [videoPlaying, setVideoPlaying] = useState(false);
+  const [imagePosition, setImagePosition] = useState({ x: 0, y: 0, width: 0, height: 0 });
   const [error, setError] = useState(null);
   const streamRef = useRef(null);
+  const detectionCanvasRef = useRef(null);
 
-  const detectImageContent = useCallback((imageData) => {
+  // Track the last detected position for smooth transitions
+  const lastDetectedPosition = useRef({ x: 0, y: 0, width: 0, height: 0 });
+
+  const detectImageContent = useCallback((imageData, x, y, width, height) => {
     const data = imageData.data;
     let totalBrightness = 0;
     let totalPixels = data.length / 4;
@@ -65,62 +50,73 @@ const ARViewer = () => {
     }
 
     const averageBrightness = totalBrightness / totalPixels;
-    return averageBrightness > 30 && averageBrightness < 225;
+    const hasContent = averageBrightness > 30 && averageBrightness < 225;
+
+    if (hasContent) {
+      lastDetectedPosition.current = { x, y, width, height };
+      return true;
+    }
+    return false;
   }, []);
 
-  const playARVideo = useCallback(() => {
-    if (!overlayVideoRef.current || videoPlaying) return;
-    overlayVideoRef.current.play();
-    setVideoPlaying(true);
-  }, [videoPlaying]);
-
   const initializeImageTracking = useCallback(() => {
-    if (!canvasRef.current || !videoRef.current) return;
+    if (!videoRef.current || !detectionCanvasRef.current) return;
 
-    const canvas = canvasRef.current;
+    const canvas = detectionCanvasRef.current;
     const context = canvas.getContext('2d');
     
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 
-    const targetArea = {
-      x: (canvas.width - 256) / 2,
-      y: (canvas.height - 384) / 2,
-      width: 256,
-      height: 384
-    };
-
     const processFrame = () => {
-      if (!canvasRef.current || !videoRef.current) return;
+      if (!videoRef.current || !detectionCanvasRef.current) return;
       
       context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+
+      // Define detection area (center of screen)
+      const detectionArea = {
+        x: (canvas.width - 256) / 2,
+        y: (canvas.height - 384) / 2,
+        width: 256,
+        height: 384
+      };
+
       const imageData = context.getImageData(
-        targetArea.x, 
-        targetArea.y, 
-        targetArea.width, 
-        targetArea.height
+        detectionArea.x,
+        detectionArea.y,
+        detectionArea.width,
+        detectionArea.height
       );
 
-      const hasContent = detectImageContent(imageData);
-      
+      const hasContent = detectImageContent(
+        imageData,
+        detectionArea.x,
+        detectionArea.y,
+        detectionArea.width,
+        detectionArea.height
+      );
+
       if (hasContent && !targetLocked) {
-        setTimeout(() => {
-          setTargetLocked(true);
-          playARVideo();
-        }, 1000);
+        setTargetLocked(true);
+        setImagePosition(lastDetectedPosition.current);
+        if (overlayVideoRef.current) {
+          overlayVideoRef.current.play();
+        }
       } else if (!hasContent && targetLocked) {
         setTargetLocked(false);
-        setVideoPlaying(false);
         if (overlayVideoRef.current) {
           overlayVideoRef.current.pause();
         }
+      } else if (hasContent && targetLocked) {
+        // Update position while tracking
+        setImagePosition(lastDetectedPosition.current);
       }
 
       requestAnimationFrame(processFrame);
     };
 
     requestAnimationFrame(processFrame);
-  }, [detectImageContent, playARVideo, targetLocked]);
+  }, [detectImageContent, targetLocked]);
 
   useEffect(() => {
     const startCamera = async () => {
@@ -185,34 +181,33 @@ const ARViewer = () => {
 
   return (
     <div className="relative h-screen w-full overflow-hidden bg-black">
-      {/* Hidden video element for camera feed */}
+      {/* Camera feed */}
       <video
         ref={videoRef}
         playsInline
-        className="hidden"
-        style={{ display: 'none' }}
+        className="absolute inset-0 h-full w-full object-cover"
       />
 
-      {/* Canvas for displaying camera feed */}
+      {/* Hidden canvas for image detection */}
       <canvas
-        ref={canvasRef}
-        className="absolute inset-0 z-10"
+        ref={detectionCanvasRef}
+        className="hidden"
       />
 
-      {/* Target area overlay */}
+      {/* Target area overlay when not locked */}
       {!targetLocked && <TargetArea />}
 
-      {/* AR Video */}
+      {/* AR Video overlay */}
       {targetLocked && (
         <video
           ref={overlayVideoRef}
           className="absolute z-20"
           style={{
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%, -50%)',
-            width: '256px',  // Match target area width
-            height: '384px'  // Match target area height
+            left: `${imagePosition.x}px`,
+            top: `${imagePosition.y}px`,
+            width: `${imagePosition.width}px`,
+            height: `${imagePosition.height}px`,
+            transition: 'all 0.1s ease-out' // Smooth movement
           }}
           playsInline
           loop
