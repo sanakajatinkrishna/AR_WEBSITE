@@ -2,7 +2,6 @@ import React, { useRef, useEffect } from 'react';
 
 const ARViewer = () => {
   const videoRef = useRef(null);
-  const containerRef = useRef(null);
 
   useEffect(() => {
     let stream = null;
@@ -20,11 +19,6 @@ const ARViewer = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-
-          // Request fullscreen after video starts playing
-          if (containerRef.current && containerRef.current.requestFullscreen) {
-            containerRef.current.requestFullscreen();
-          }
         }
       } catch (err) {
         console.error('Camera error:', err);
@@ -33,52 +27,33 @@ const ARViewer = () => {
 
     startCamera();
 
-    // Handle exit fullscreen
-    const handleFullscreenChange = () => {
-      if (!document.fullscreenElement && containerRef.current) {
-        containerRef.current.requestFullscreen().catch(err => {
-          console.error('Error attempting to enable fullscreen:', err);
-        });
-      }
-    };
-
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-
-    // Cleanup function
     return () => {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
     };
   }, []);
 
   return (
-    <div 
-      ref={containerRef} 
-      className="fixed inset-0 w-screen h-screen overflow-hidden bg-black"
-      style={{
-        width: '100vw',
-        height: '100vh'
-      }}
-    >
+    <div className="fixed inset-0 w-screen h-screen overflow-hidden bg-black">
       {/* Camera Feed */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        className="absolute inset-0 w-full h-full object-cover"
-        style={{
-          width: '100vw',
-          height: '100vh',
-          objectFit: 'cover'
-        }}
+        className="w-full h-full object-cover"
       />
 
-      {/* Target Rectangle */}
-      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-        <div className="w-64 h-96 border-4 border-red-500 rounded-lg" />
+      {/* Target Rectangle - Centered with red border */}
+      <div className="absolute inset-0 flex items-center justify-center">
+        <div 
+          className="border-4 border-red-500 rounded-lg"
+          style={{
+            width: '250px',  // Adjust size as needed
+            height: '350px'  // Adjust size as needed
+          }}
+        />
       </div>
     </div>
   );
