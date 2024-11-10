@@ -9,7 +9,6 @@ const ARViewer = () => {
 
     const startCamera = async () => {
       try {
-        // Request camera access
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
@@ -24,8 +23,6 @@ const ARViewer = () => {
           videoRef.current.onloadedmetadata = async () => {
             try {
               await videoRef.current.play();
-              
-              // Request fullscreen
               if (containerRef.current && containerRef.current.requestFullscreen) {
                 await containerRef.current.requestFullscreen();
               } else if (containerRef.current && containerRef.current.webkitRequestFullscreen) {
@@ -41,10 +38,8 @@ const ARViewer = () => {
       }
     };
 
-    // Start camera when component mounts
     startCamera();
 
-    // Cleanup
     return () => {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
@@ -55,34 +50,22 @@ const ARViewer = () => {
   return (
     <div 
       ref={containerRef}
-      className="fixed top-0 left-0 right-0 bottom-0 w-screen h-screen bg-black"
-      style={{
-        position: 'fixed',
-        width: '100vw',
-        height: '100vh'
-      }}
+      className="fixed top-0 left-0 right-0 bottom-0 w-screen h-screen bg-black relative"
     >
+      {/* Camera Feed with lower z-index */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
         className="absolute top-0 left-0 w-full h-full object-cover"
-        style={{
-          position: 'absolute',
-          width: '100%',
-          height: '100%',
-          objectFit: 'cover'
-        }}
+        style={{ zIndex: 1 }}
       />
       
-      {/* Rectangle Overlay */}
+      {/* Rectangle Overlay with higher z-index */}
       <div 
-        className="absolute top-0 left-0 right-0 bottom-0 flex items-center justify-center pointer-events-none"
-        style={{
-          position: 'absolute',
-          zIndex: 10
-        }}
+        className="absolute top-0 left-0 w-full h-full flex items-center justify-center"
+        style={{ zIndex: 2 }}
       >
         <div 
           className="border-8 border-red-500"
