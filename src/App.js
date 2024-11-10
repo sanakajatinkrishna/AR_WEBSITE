@@ -73,7 +73,7 @@ const ARViewer = () => {
         <div 
           className="border-4 border-red-500 rounded-lg"
           style={{
-            width: '300px',  // Fixed width instead of viewport units
+            width: '500px',  // Fixed width instead of viewport units
             height: '200px'  // Fixed height instead of viewport units
           }}
         />
