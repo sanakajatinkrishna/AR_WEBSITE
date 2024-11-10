@@ -9,11 +9,6 @@ const ARViewer = () => {
     
     const startCamera = async () => {
       try {
-        // Request fullscreen first
-        if (containerRef.current && document.documentElement.requestFullscreen) {
-          await document.documentElement.requestFullscreen();
-        }
-
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
@@ -25,6 +20,11 @@ const ARViewer = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
+
+          // Request fullscreen after video starts playing
+          if (containerRef.current && containerRef.current.requestFullscreen) {
+            containerRef.current.requestFullscreen();
+          }
         }
       } catch (err) {
         console.error('Camera error:', err);
@@ -33,10 +33,10 @@ const ARViewer = () => {
 
     startCamera();
 
-    // Keep fullscreen mode active
+    // Handle exit fullscreen
     const handleFullscreenChange = () => {
-      if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
-        document.documentElement.requestFullscreen().catch(err => {
+      if (!document.fullscreenElement && containerRef.current) {
+        containerRef.current.requestFullscreen().catch(err => {
           console.error('Error attempting to enable fullscreen:', err);
         });
       }
@@ -44,25 +44,22 @@ const ARViewer = () => {
 
     document.addEventListener('fullscreenchange', handleFullscreenChange);
 
-    // Cleanup
+    // Cleanup function
     return () => {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
-      if (document.fullscreenElement) {
-        document.exitFullscreen();
-      }
     };
   }, []);
 
   return (
     <div 
-      ref={containerRef}
-      className="fixed inset-0 w-screen h-screen bg-black"
-      style={{ 
-        minHeight: '100vh',
-        minWidth: '100vw'
+      ref={containerRef} 
+      className="fixed inset-0 w-screen h-screen overflow-hidden bg-black"
+      style={{
+        width: '100vw',
+        height: '100vh'
       }}
     >
       {/* Camera Feed */}
@@ -71,31 +68,17 @@ const ARViewer = () => {
         autoPlay
         playsInline
         muted
-        className="absolute top-0 left-0 w-full h-full object-cover z-0"
+        className="absolute inset-0 w-full h-full object-cover"
+        style={{
+          width: '100vw',
+          height: '100vh',
+          objectFit: 'cover'
+        }}
       />
 
-      {/* Red Rectangle Overlay */}
-      <div 
-        className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none"
-        style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0
-        }}
-      >
-        <div 
-          className="border-4 border-red-500"
-          style={{
-            width: '250px',
-            height: '350px',
-            position: 'absolute',
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%, -50%)'
-          }}
-        />
+      {/* Target Rectangle */}
+      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+        <div className="w-64 h-96 border-4 border-red-500 rounded-lg" />
       </div>
     </div>
   );
