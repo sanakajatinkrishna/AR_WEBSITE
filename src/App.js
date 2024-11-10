@@ -6,10 +6,9 @@ const ARViewer = () => {
 
   useEffect(() => {
     let stream = null;
-
+    
     const startCamera = async () => {
       try {
-        // Request camera access
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
@@ -20,15 +19,12 @@ const ARViewer = () => {
 
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          
           videoRef.current.onloadedmetadata = async () => {
             try {
               await videoRef.current.play();
-              
-              // Request fullscreen
-              if (containerRef.current && containerRef.current.requestFullscreen) {
+              if (containerRef.current?.requestFullscreen) {
                 await containerRef.current.requestFullscreen();
-              } else if (containerRef.current && containerRef.current.webkitRequestFullscreen) {
+              } else if (containerRef.current?.webkitRequestFullscreen) {
                 await containerRef.current.webkitRequestFullscreen();
               }
             } catch (err) {
@@ -41,10 +37,8 @@ const ARViewer = () => {
       }
     };
 
-    // Start camera when component mounts
     startCamera();
 
-    // Cleanup
     return () => {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
@@ -55,41 +49,23 @@ const ARViewer = () => {
   return (
     <div 
       ref={containerRef}
-      className="fixed top-0 left-0 right-0 bottom-0 w-screen h-screen bg-black"
-      style={{
-        position: 'fixed',
-        width: '100vw',
-        height: '100vh'
-      }}
+      className="fixed inset-0 w-screen h-screen bg-black"
     >
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        className="absolute top-0 left-0 w-full h-full object-cover"
-        style={{
-          position: 'absolute',
-          width: '100%',
-          height: '100%',
-          objectFit: 'cover'
-        }}
+        className="absolute inset-0 w-full h-full object-cover"
       />
       
       {/* Rectangle Overlay */}
-      <div 
-        className="absolute top-0 left-0 right-0 bottom-0 flex items-center justify-center pointer-events-none"
-        style={{
-          position: 'absolute',
-          zIndex: 10
-        }}
-      >
+      <div className="absolute inset-0 flex items-center justify-center">
         <div 
-          className="border-8 border-red-500"
+          className="border-8 border-red-500 rounded-lg"
           style={{
             width: '80vw',
-            height: '60vh',
-            borderRadius: '8px'
+            height: '60vh'
           }}
         />
       </div>
