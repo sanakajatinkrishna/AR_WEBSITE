@@ -13,70 +13,72 @@ const firebaseConfig = {
   measurementId: "G-N5Q9K9G3JN"
 };
 
+// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const storage = getStorage(app);
 
+// Simple Alert Component
+const Alert = ({ children }) => (
+  <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
+    {children}
+  </div>
+);
+
 const ARViewer = () => {
+  // Refs
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const streamRef = useRef(null);
-  
+  const rafRef = useRef(null);
+  const modelRef = useRef(null);
+
+  // State
   const [hasPermission, setHasPermission] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [arContent, setArContent] = useState([]);
   const [error, setError] = useState(null);
   const [debug, setDebug] = useState('');
   const [currentMatch, setCurrentMatch] = useState(null);
+  const [isModelLoading, setIsModelLoading] = useState(true);
 
+  // Debug logger
   const addDebug = useCallback((message) => {
     console.log(message);
     setDebug(prev => `${message}\n${prev}`);
   }, []);
 
-  // Load AR content from Firestore and get download URLs
+  // Initialize TensorFlow
   useEffect(() => {
-    const loadARContent = async () => {
+    const loadModel = async () => {
       try {
-        addDebug('Loading AR content...');
-        const querySnapshot = await getDocs(collection(db, 'arContent'));
-        const content = [];
-        
-        for (const doc of querySnapshot.docs) {
-          const data = doc.data();
-          try {
-            // Get actual download URLs for both image and video
-            const imageRef = ref(storage, data.imageUrl);
-            const videoRef = ref(storage, data.videoUrl);
-            
-            const [imageDownloadUrl, videoDownloadUrl] = await Promise.all([
-              getDownloadURL(imageRef),
-              getDownloadURL(videoRef)
-            ]);
-
-            content.push({
-              id: doc.id,
-              ...data,
-              imageUrl: imageDownloadUrl,
-              videoUrl: videoDownloadUrl
-            });
-            
-            addDebug(`Loaded content ID: ${doc.id}`);
-          } catch (error) {
-            addDebug(`Error loading content ${doc.id}: ${error.message}`);
-          }
-        }
-        
-        setArContent(content);
-        addDebug(`Successfully loaded ${content.length} AR content items`);
+        addDebug('Loading TensorFlow model...');
+        const model = await window.tf.loadGraphModel(
+          'https://tfhub.dev/tensorflow/tfjs-model/ssd_mobilenet_v2/1/default/1'
+        );
+        modelRef.current = model;
+        setIsModelLoading(false);
+        addDebug('Model loaded successfully');
       } catch (error) {
-        setError(`Failed to load AR content: ${error.message}`);
-        addDebug(`AR content load error: ${error.message}`);
+        setError(`Model loading error: ${error.message}`);
+        addDebug(`Model loading error: ${error.message}`);
+        setIsModelLoading(false);
       }
     };
 
-    loadARContent();
+    if (window.tf) {
+      loadModel();
+    } else {
+      setError('TensorFlow not loaded');
+      setIsModelLoading(false);
+    }
+
+    return () => {
+      if (modelRef.current) {
+        modelRef.current.dispose();
+      }
+    };
   }, [addDebug]);
 
   // Initialize camera
@@ -94,11 +96,13 @@ const ARViewer = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           streamRef.current = stream;
+          await videoRef.current.play();
           setHasPermission(true);
-          addDebug('Camera initialized successfully');
+          addDebug('Camera initialized');
         }
       } catch (err) {
-        setError(`Camera access error: ${err.message}`);
+        setError(`Camera error: ${err.message}`);
+        addDebug(`Camera error: ${err.message}`);
         setHasPermission(false);
       }
     };
@@ -112,84 +116,127 @@ const ARViewer = () => {
     };
   }, [addDebug]);
 
-  const matchImage = useCallback(async (capturedCanvas) => {
-    if (!arContent.length) return null;
+  // Load AR content
+  useEffect(() => {
+    const loadContent = async () => {
+      try {
+        const querySnapshot = await getDocs(collection(db, 'arContent'));
+        const content = [];
+
+        for (const doc of querySnapshot.docs) {
+          const data = doc.data();
+          try {
+            // Get download URLs
+            const [imageUrl, videoUrl] = await Promise.all([
+              getDownloadURL(ref(storage, data.imageUrl)),
+              getDownloadURL(ref(storage, data.videoUrl))
+            ]);
+
+            content.push({
+              id: doc.id,
+              ...data,
+              imageUrl,
+              videoUrl
+            });
+          } catch (e) {
+            addDebug(`Error loading content ${doc.id}: ${e.message}`);
+          }
+        }
+
+        setArContent(content);
+        addDebug(`Loaded ${content.length} AR items`);
+      } catch (error) {
+        setError(`Content loading error: ${error.message}`);
+        addDebug(`Content loading error: ${error.message}`);
+      }
+    };
+
+    loadContent();
+  }, [addDebug]);
+  // Image matching function
+  const matchImage = useCallback(async (tensor) => {
+    if (!modelRef.current || !tensor) return null;
     
     try {
-      // Convert canvas to tensor
-      const capturedTensor = window.tf.browser.fromPixels(capturedCanvas);
-      const resizedCaptured = window.tf.image.resizeBilinear(capturedTensor, [224, 224]);
-      const normalizedCaptured = resizedCaptured.div(255.0);
-
-      for (const content of arContent) {
-        // Load and process reference image
-        const refImage = new Image();
-        refImage.crossOrigin = 'anonymous';
-        
-        try {
-          await new Promise((resolve, reject) => {
-            refImage.onload = resolve;
-            refImage.onerror = reject;
-            refImage.src = content.imageUrl;
-          });
-
-          const refTensor = window.tf.browser.fromPixels(refImage);
-          const resizedRef = window.tf.image.resizeBilinear(refTensor, [224, 224]);
-          const normalizedRef = resizedRef.div(255.0);
-
-          // Calculate similarity
-          const similarity = window.tf.metrics.cosineProximity(
-            normalizedCaptured.reshape([1, -1]),
-            normalizedRef.reshape([1, -1])
-          ).dataSync()[0];
-
-          // Cleanup tensors
-          refTensor.dispose();
-          resizedRef.dispose();
-          normalizedRef.dispose();
-
-          addDebug(`Similarity with ${content.id}: ${similarity.toFixed(3)}`);
-
-          if (similarity > 0.7) {
-            return content;
-          }
-        } catch (error) {
-          addDebug(`Error processing reference image: ${error.message}`);
+      const predictions = await modelRef.current.executeAsync(tensor.expandDims(0));
+      const scores = predictions[5].dataSync();
+      const boxes = predictions[1].dataSync();
+      
+      // Cleanup tensors
+      predictions.forEach(t => t.dispose());
+      
+      // Find best match
+      let bestMatch = { score: 0, box: null };
+      for (let i = 0; i < scores.length; i++) {
+        if (scores[i] > bestMatch.score) {
+          bestMatch = {
+            score: scores[i],
+            box: [
+              boxes[i * 4],
+              boxes[i * 4 + 1],
+              boxes[i * 4 + 2],
+              boxes[i * 4 + 3]
+            ]
+          };
         }
       }
-
-      // Cleanup captured tensors
-      capturedTensor.dispose();
-      resizedCaptured.dispose();
-      normalizedCaptured.dispose();
-
-      return null;
+      
+      return bestMatch.score > 0.5 ? bestMatch : null;
     } catch (error) {
-      addDebug(`Error in matchImage: ${error.message}`);
+      addDebug(`Matching error: ${error.message}`);
       return null;
     }
-  }, [arContent, addDebug]);
+  }, [addDebug]);
 
-  const scanFrame = useCallback(async () => {
-    if (!isScanning || !canvasRef.current || !videoRef.current) return;
+  // Frame processing
+  const processFrame = useCallback(async () => {
+    if (!canvasRef.current || !videoRef.current) return;
 
     try {
-      // Draw current frame to canvas
       const context = canvasRef.current.getContext('2d');
       canvasRef.current.width = videoRef.current.videoWidth;
       canvasRef.current.height = videoRef.current.videoHeight;
       context.drawImage(videoRef.current, 0, 0);
 
-      // Try to find a match
-      const match = await matchImage(canvasRef.current);
+      const tensor = window.tf.browser.fromPixels(canvasRef.current);
+      const match = await matchImage(tensor);
+      tensor.dispose();
 
       if (match) {
-        addDebug('Match found! Playing video...');
-        setCurrentMatch(match);
-        
-        if (overlayVideoRef.current) {
-          overlayVideoRef.current.style.display = 'block';
-          await overlayVideoRef.current.play();
+        const { box } = match;
+        return {
+          x: Math.round(box[1] * canvasRef.current.width),
+          y: Math.round(box[0] * canvasRef.current.height),
+          width: Math.round((box[3] - box[1]) * canvasRef.current.width),
+          height: Math.round((box[2] - box[0]) * canvasRef.current.height)
+        };
+      }
+      
+      return null;
+    } catch (error) {
+      addDebug(`Processing error: ${error.message}`);
+      return null;
+    }
+  }, [matchImage, addDebug]);
+
+  // Scanning function
+  const scanFrame = useCallback(async () => {
+    if (!isScanning) return;
+
+    try {
+      const bbox = await processFrame();
+      
+      if (bbox) {
+        if (!currentMatch && arContent.length > 0) {
+          setCurrentMatch(arContent[0]);
+          if (overlayVideoRef.current) {
+            overlayVideoRef.current.style.display = 'block';
+            overlayVideoRef.current.style.transform = 
+              `translate(${bbox.x}px, ${bbox.y}px)`;
+            overlayVideoRef.current.style.width = `${bbox.width}px`;
+            overlayVideoRef.current.style.height = `${bbox.height}px`;
+            await overlayVideoRef.current.play();
+          }
         }
       } else if (currentMatch) {
         setCurrentMatch(null);
@@ -202,21 +249,29 @@ const ARViewer = () => {
       addDebug(`Scan error: ${error.message}`);
     }
 
-    if (isScanning) {
-      requestAnimationFrame(scanFrame);
-    }
-  }, [isScanning, matchImage, currentMatch, addDebug]);
+    rafRef.current = requestAnimationFrame(scanFrame);
+  }, [isScanning, processFrame, currentMatch, arContent, addDebug]);
 
+  // Handle scanning state
   useEffect(() => {
     if (isScanning) {
       scanFrame();
     } else {
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current);
+      }
       setCurrentMatch(null);
       if (overlayVideoRef.current) {
         overlayVideoRef.current.pause();
         overlayVideoRef.current.style.display = 'none';
       }
     }
+
+    return () => {
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current);
+      }
+    };
   }, [isScanning, scanFrame]);
 
   return (
@@ -225,9 +280,7 @@ const ARViewer = () => {
         <h1 className="text-2xl font-bold text-center mb-6">AR Image Scanner</h1>
         
         {error && (
-          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
-            {error}
-          </div>
+          <Alert>{error}</Alert>
         )}
 
         <div className="relative w-full aspect-video bg-black rounded-lg overflow-hidden">
@@ -238,24 +291,31 @@ const ARViewer = () => {
             muted
             className="w-full h-full object-cover"
           />
+          
           <canvas
             ref={canvasRef}
             className="absolute top-0 left-0 w-full h-full pointer-events-none opacity-0"
           />
+          
           {currentMatch && currentMatch.videoUrl && (
             <video
               ref={overlayVideoRef}
               src={currentMatch.videoUrl}
-              className="absolute top-0 left-0 w-full h-full object-cover"
+              className="absolute transform-gpu"
               playsInline
               loop
               muted
-              style={{ display: 'none' }}
+              style={{
+                display: 'none',
+                transition: 'all 0.2s ease-out'
+              }}
             />
           )}
           
-          <div className="absolute top-2 left-2 bg-black bg-opacity-50 text-white px-3 py-1 rounded">
-            {isScanning ? 'Scanning...' : 'Ready'}
+          <div className="absolute top-2 left-2 right-2 flex justify-between">
+            <div className="bg-black bg-opacity-50 text-white px-3 py-1 rounded">
+              {isModelLoading ? 'Loading model...' : isScanning ? 'Scanning...' : 'Ready'}
+            </div>
           </div>
 
           {!hasPermission && (
@@ -266,7 +326,7 @@ const ARViewer = () => {
         </div>
 
         <div className="mt-6 flex justify-center">
-          {hasPermission && (
+          {hasPermission && !isModelLoading && (
             <button
               onClick={() => setIsScanning(!isScanning)}
               className={`px-6 py-3 rounded-lg font-semibold ${
@@ -274,6 +334,7 @@ const ARViewer = () => {
                   ? 'bg-red-500 hover:bg-red-600 text-white'
                   : 'bg-blue-500 hover:bg-blue-600 text-white'
               }`}
+              disabled={isModelLoading}
             >
               {isScanning ? 'Stop Scanning' : 'Start Scanning'}
             </button>
