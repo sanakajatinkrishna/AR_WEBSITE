@@ -24,30 +24,81 @@ const ARCameraViewer = () => {
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const [cameraActive, setCameraActive] = useState(false);
+  const [cameraPermission, setCameraPermission] = useState(false);
   const [error, setError] = useState(null);
-  const [isVisible, setIsVisible] = useState(false);
   const [arContent, setArContent] = useState(null);
   const [loading, setLoading] = useState(true);
-  
+  const streamRef = useRef(null);
+
+  // Check camera permissions
+  const checkCameraPermissions = async () => {
+    try {
+      const result = await navigator.permissions.query({ name: 'camera' });
+      setCameraPermission(result.state === 'granted');
+      result.addEventListener('change', (e) => {
+        setCameraPermission(e.target.state === 'granted');
+      });
+    } catch (err) {
+      console.warn('Permissions API not supported, will try direct camera access');
+    }
+  };
+
+  // Request camera access
+  const requestCameraAccess = async () => {
+    try {
+      setError(null);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      });
+      
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+        setCameraActive(true);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('Camera access error:', err);
+      setError(`Camera access denied: ${err.message}`);
+      return false;
+    }
+  };
+
+  // Initialize component
+  useEffect(() => {
+    checkCameraPermissions();
+    
+    // Cleanup function
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, []);
+
   // Fetch AR content from Firebase
   useEffect(() => {
     const fetchARContent = () => {
       try {
-        // Create a query to get the latest AR content
         const q = query(
           collection(db, 'arContent'),
           orderBy('timestamp', 'desc'),
           limit(1)
         );
 
-        // Real-time listener for AR content
         const unsubscribe = onSnapshot(q, async (snapshot) => {
           if (!snapshot.empty) {
             const doc = snapshot.docs[0];
             const data = doc.data();
             
             try {
-              // Get the actual video URL from Firebase Storage
               const videoUrl = await getDownloadURL(ref(storage, data.fileName.video));
               
               setArContent({
@@ -55,7 +106,6 @@ const ARCameraViewer = () => {
                 videoUrl
               });
 
-              // Set the video source
               if (overlayVideoRef.current) {
                 overlayVideoRef.current.src = videoUrl;
                 overlayVideoRef.current.load();
@@ -65,6 +115,10 @@ const ARCameraViewer = () => {
               setError('Failed to load video content');
             }
           }
+          setLoading(false);
+        }, (error) => {
+          console.error('Firebase error:', error);
+          setError('Failed to connect to database');
           setLoading(false);
         });
 
@@ -84,120 +138,70 @@ const ARCameraViewer = () => {
     };
   }, []);
 
-  // Initialize camera
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment' } 
-      });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        setCameraActive(true);
-        startVisibilityTracking();
-      }
-    } catch (err) {
-      setError('Failed to access camera: ' + err.message);
+  // Handle start camera button click
+  const handleStartCamera = async () => {
+    const success = await requestCameraAccess();
+    if (success) {
+      setupARCanvas();
     }
   };
 
-  // Set up canvas and tracking
-  useEffect(() => {
-    if (!canvasRef.current || !overlayVideoRef.current) return;
+  // Setup AR canvas
+  const setupARCanvas = () => {
+    if (!canvasRef.current) return;
 
     const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
     
-    const setCanvasSize = () => {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
+    const updateCanvasSize = () => {
+      const displayWidth = window.innerWidth;
+      const displayHeight = window.innerHeight;
+      canvas.width = displayWidth;
+      canvas.height = displayHeight;
+      
+      // Clear and set default state
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
     };
     
-    setCanvasSize();
-    window.addEventListener('resize', setCanvasSize);
+    updateCanvasSize();
+    window.addEventListener('resize', updateCanvasSize);
 
-    return () => {
-      window.removeEventListener('resize', setCanvasSize);
-    };
-  }, []);
-
-  // Visibility tracking setup
-  const startVisibilityTracking = () => {
-    if (!('ImageCapture' in window)) {
-      console.warn('ImageCapture API not available');
-      return;
-    }
-
-    const track = videoRef.current?.srcObject?.getVideoTracks()[0];
-    if (!track) return;
-
-    const imageCapture = new ImageCapture(track);
-    let animationFrameId;
-    let analyzing = false;
-
-    const analyzeFrame = async () => {
-      if (!analyzing) {
-        analyzing = true;
-        try {
-          const imageBitmap = await imageCapture.grabFrame();
-          const canvas = document.createElement('canvas');
-          canvas.width = imageBitmap.width;
-          canvas.height = imageBitmap.height;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(imageBitmap, 0, 0);
-          
-          const imageData = ctx.getImageData(
-            canvas.width * 0.4,
-            canvas.height * 0.4,
-            canvas.width * 0.2,
-            canvas.height * 0.2
+    // Start rendering loop
+    const render = () => {
+      if (ctx && videoRef.current && arContent?.videoUrl) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // Draw video frame if video is playing
+        if (!overlayVideoRef.current?.paused) {
+          ctx.drawImage(
+            overlayVideoRef.current,
+            canvas.width * 0.1, // X position
+            canvas.height * 0.1, // Y position
+            canvas.width * 0.8, // Width
+            canvas.height * 0.6  // Height
           );
-          
-          let total = 0;
-          for (let i = 0; i < imageData.data.length; i += 4) {
-            total += (imageData.data[i] + imageData.data[i + 1] + imageData.data[i + 2]) / 3;
-          }
-          const average = total / (imageData.data.length / 4);
-          
-          const newIsVisible = average > 50;
-          if (newIsVisible !== isVisible) {
-            setIsVisible(newIsVisible);
-            if (!newIsVisible && overlayVideoRef.current) {
-              overlayVideoRef.current.pause();
-            } else if (newIsVisible && overlayVideoRef.current) {
-              overlayVideoRef.current.play();
-            }
-          }
-        } catch (error) {
-          console.error('Frame analysis error:', error);
         }
-        analyzing = false;
       }
-      animationFrameId = requestAnimationFrame(analyzeFrame);
+      requestAnimationFrame(render);
     };
 
-    analyzeFrame();
-
-    return () => {
-      if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-      }
-    };
+    render();
   };
 
-  // Video control
+  // Toggle video playback
   const toggleVideo = () => {
-    const video = overlayVideoRef.current;
-    if (!video) return;
-    
-    if (video.paused && isVisible) {
-      video.play();
-    } else {
-      video.pause();
+    if (overlayVideoRef.current) {
+      if (overlayVideoRef.current.paused) {
+        overlayVideoRef.current.play();
+      } else {
+        overlayVideoRef.current.pause();
+      }
     }
   };
 
   return (
     <div className="relative h-screen w-full overflow-hidden bg-black">
-      {/* Loading State */}
+      {/* Loading Overlay */}
       {loading && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
           <div className="rounded-lg bg-white p-4">
@@ -206,22 +210,22 @@ const ARCameraViewer = () => {
         </div>
       )}
 
-      {/* Camera Video Feed */}
+      {/* Camera Feed */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
+        muted
         className="absolute inset-0 h-full w-full object-cover"
-        onCanPlay={() => videoRef.current?.play()}
       />
 
-      {/* Overlay Canvas */}
+      {/* AR Canvas */}
       <canvas
         ref={canvasRef}
         className="absolute inset-0 z-10 h-full w-full"
       />
 
-      {/* Video Overlay */}
+      {/* Hidden Video for AR Content */}
       <video
         ref={overlayVideoRef}
         className="hidden"
@@ -234,33 +238,36 @@ const ARCameraViewer = () => {
       <div className="absolute bottom-4 left-0 right-0 z-20 flex flex-col items-center space-y-2">
         {!cameraActive ? (
           <button
-            onClick={startCamera}
-            className="rounded-lg bg-blue-500 px-4 py-2 text-white hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+            onClick={handleStartCamera}
             disabled={loading || !arContent}
+            className="rounded-lg bg-blue-500 px-4 py-2 text-white hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:bg-gray-400"
           >
-            Start Camera
+            {loading ? 'Loading...' : 'Start Camera'}
           </button>
         ) : (
-          <>
-            <button
-              onClick={toggleVideo}
-              className="rounded-lg bg-green-500 px-4 py-2 text-white hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2"
-              disabled={!isVisible}
-            >
-              Toggle Video Overlay
-            </button>
-            <div className={`text-sm ${isVisible ? 'text-green-500' : 'text-red-500'}`}>
-              Canvas is {isVisible ? 'visible' : 'not visible'}
-            </div>
-          </>
+          <button
+            onClick={toggleVideo}
+            className="rounded-lg bg-green-500 px-4 py-2 text-white hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2"
+          >
+            Toggle AR Video
+          </button>
         )}
       </div>
 
-      {/* Error Message */}
+      {/* Error Messages */}
       {error && (
         <div className="absolute inset-x-0 top-4 z-30 text-center">
           <div className="inline-block rounded-lg bg-red-500 px-4 py-2 text-white">
             {error}
+          </div>
+        </div>
+      )}
+
+      {/* Permission Status */}
+      {!cameraPermission && !cameraActive && (
+        <div className="absolute inset-x-0 top-16 z-30 text-center">
+          <div className="inline-block rounded-lg bg-yellow-500 px-4 py-2 text-white">
+            Camera permission required
           </div>
         </div>
       )}
