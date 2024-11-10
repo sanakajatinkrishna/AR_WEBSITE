@@ -1,8 +1,9 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import './App.css';
 
+// Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -19,73 +20,63 @@ const db = getFirestore(app);
 
 function App() {
   const [isLoading, setIsLoading] = useState(true);
-  const [showMessage, setShowMessage] = useState(true);
+  const [hasPermission, setHasPermission] = useState(false);
   const [currentContent, setCurrentContent] = useState(null);
-  const [isMarkerFound, setIsMarkerFound] = useState(false);
-  const [error, setError] = useState(null);
-  const videoRef = useRef(null);
-  const sceneRef = useRef(null);
+  const [errorMessage, setErrorMessage] = useState(null);
 
   useEffect(() => {
-    const loadARScripts = async () => {
+    // Request camera permission first
+    const requestCameraPermission = async () => {
       try {
-        // Load ARJS first
-        const arjsScript = document.createElement('script');
-        arjsScript.src = 'https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar-nft.js';
-        arjsScript.async = true;
-        
-        // Load AFrame
-        const aframeScript = document.createElement('script');
-        aframeScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/aframe/1.4.2/aframe.min.js';
-        aframeScript.async = true;
-
-        // Load Mind-AR
-        const mindarScript = document.createElement('script');
-        mindarScript.src = 'https://cdn.jsdelivr.net/npm/mind-ar@1.2.2/dist/mindar-image-aframe.prod.js';
-        mindarScript.async = true;
-
-        // Append scripts in order
-        document.body.appendChild(aframeScript);
-        
-        await new Promise((resolve) => {
-          aframeScript.onload = resolve;
-        });
-        
-        document.body.appendChild(arjsScript);
-        
-        await new Promise((resolve) => {
-          arjsScript.onload = resolve;
-        });
-        
-        document.body.appendChild(mindarScript);
-        
-        await new Promise((resolve) => {
-          mindarScript.onload = () => {
-            initializeAR();
-            setIsLoading(false);
-            resolve();
-          };
-        });
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        setHasPermission(true);
+        // Stop the stream as AR.js will handle it
+        stream.getTracks().forEach(track => track.stop());
       } catch (err) {
-        setError('Failed to load AR components: ' + err.message);
-        setIsLoading(false);
+        console.error('Camera permission error:', err);
+        setErrorMessage('Please allow camera access to use AR features');
+        setHasPermission(false);
       }
     };
 
-    loadARScripts();
-
-    // Cleanup
-    return () => {
-      const scripts = document.querySelectorAll('script');
-      scripts.forEach(script => {
-        if (script.src.includes('aframe') || script.src.includes('ar.js') || script.src.includes('mind-ar')) {
-          document.body.removeChild(script);
-        }
-      });
-    };
+    requestCameraPermission();
   }, []);
 
   useEffect(() => {
+    // Only load AR scripts after camera permission is granted
+    if (hasPermission) {
+      const loadARScripts = async () => {
+        try {
+          // Load Aframe first
+          const aframe = document.createElement('script');
+          aframe.src = 'https://aframe.io/releases/1.4.0/aframe.min.js';
+          document.head.appendChild(aframe);
+
+          await new Promise((resolve) => {
+            aframe.onload = resolve;
+          });
+
+          // Then load AR.js
+          const arjs = document.createElement('script');
+          arjs.src = 'https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js';
+          document.head.appendChild(arjs);
+
+          arjs.onload = () => {
+            setIsLoading(false);
+            console.log('AR.js loaded successfully');
+          };
+        } catch (error) {
+          console.error('Error loading AR scripts:', error);
+          setErrorMessage('Failed to load AR components');
+        }
+      };
+
+      loadARScripts();
+    }
+  }, [hasPermission]);
+
+  useEffect(() => {
+    // Listen for Firebase updates
     const q = query(
       collection(db, 'arContent'),
       orderBy('timestamp', 'desc'),
@@ -101,140 +92,88 @@ function App() {
             id: change.doc.id,
             ...data
           });
-          
-          // Pre-load the image for pattern creation
-          const img = new Image();
-          img.crossOrigin = "Anonymous";
-          img.src = data.imageUrl;
-          img.onload = () => {
-            console.log('Target image loaded successfully');
-          };
-          img.onerror = (err) => {
-            console.error('Error loading target image:', err);
-            setError('Failed to load target image');
-          };
         }
       });
-    }, (error) => {
-      console.error('Firebase error:', error);
-      setError('Failed to fetch content: ' + error.message);
     });
 
     return () => unsubscribe();
   }, []);
 
-  const initializeAR = () => {
-    if (typeof window.AFRAME !== 'undefined') {
-      window.AFRAME.registerComponent('ar-video', {
-        init: function() {
-          const marker = this.el.parentNode;
-          const video = this.el.getAttribute('material').src;
-
-          marker.addEventListener('markerFound', () => {
-            console.log('Marker found!');
-            setIsMarkerFound(true);
-            setShowMessage(false);
-            if (video && video.play) {
-              video.play();
-            }
-          });
-
-          marker.addEventListener('markerLost', () => {
-            console.log('Marker lost!');
-            setIsMarkerFound(false);
-            setShowMessage(true);
-            if (video && video.pause) {
-              video.pause();
-            }
-          });
-        }
-      });
-    }
-  };
-
-  if (error) {
-    return (
-      <div className="error-screen">
-        <h2>Error</h2>
-        <p>{error}</p>
-        <button onClick={() => window.location.reload()}>Retry</button>
-      </div>
-    );
-  }
-
-  if (isLoading || !currentContent) {
+  // Show loading screen
+  if (isLoading) {
     return (
       <div className="loading-screen">
         <div className="loading-spinner"></div>
-        <p>Loading AR Experience...</p>
+        <p>Starting AR Camera...</p>
       </div>
     );
   }
 
+  // Show error message
+  if (errorMessage) {
+    return (
+      <div className="error-screen">
+        <h2>Error</h2>
+        <p>{errorMessage}</p>
+        <button onClick={() => window.location.reload()}>Try Again</button>
+      </div>
+    );
+  }
+
+  // Show AR scene
   return (
-    <div className="ar-container">
-      {showMessage && (
-        <div className="overlay-message">
-          <p>Point your camera at the image marker</p>
-          {isMarkerFound ? 
-            <span className="status success">Target Found ✓</span> : 
-            <span className="status scanning">Scanning...</span>
-          }
+    <>
+      <div className="ar-overlay">
+        <div className="status-message">
+          Point camera at the image
         </div>
-      )}
+      </div>
 
       <a-scene
-        ref={sceneRef}
         embedded
-        arjs="trackingMethod: best; sourceType: webcam; debugUIEnabled: true; patternRatio: 0.75; detectionMode: mono_and_matrix;"
+        arjs="sourceType: webcam; debugUIEnabled: false; detectionMode: mono_and_matrix;"
+        renderer="logarithmicDepthBuffer: true;"
         vr-mode-ui="enabled: false"
-        renderer="logarithmicDepthBuffer: true; precision: medium;"
-        inspector="url: https://cdn.jsdelivr.net/gh/aframevr/aframe-inspector@master/dist/aframe-inspector.min.js"
       >
-        <a-assets timeout="30000">
-          <video
-            ref={videoRef}
-            id="ar-video"
-            src={currentContent.videoUrl}
-            preload="auto"
-            loop
-            crossOrigin="anonymous"
-            playsInline
-            webkit-playsinline
-          ></video>
-        </a-assets>
+        {currentContent && (
+          <>
+            <a-assets>
+              <video
+                id="ar-video"
+                src={currentContent.videoUrl}
+                preload="auto"
+                loop
+                crossOrigin="anonymous"
+                playsInline
+                webkit-playsinline
+              ></video>
+            </a-assets>
 
-        <a-marker
-          preset="pattern"
-          type="pattern"
-          url={currentContent.imageUrl}
-          smooth="true"
-          smoothCount="5"
-          smoothTolerance="0.01"
-          smoothThreshold="2"
-          raycaster="objects: .clickable"
-          emitevents="true"
-          cursor="fuse: false; rayOrigin: mouse;"
-        >
-          <a-video
-            src="#ar-video"
-            position="0 0 0"
-            rotation="-90 0 0"
-            width="2"
-            height="1.5"
-            ar-video
-          ></a-video>
-        </a-marker>
+            <a-marker
+              preset="pattern"
+              type="pattern"
+              url={currentContent.imageUrl}
+              smooth="true"
+              smoothCount="5"
+              smoothTolerance="0.01"
+              raycaster="objects: .clickable"
+              emitevents="true"
+              cursor="fuse: false; rayOrigin: mouse;"
+            >
+              <a-video
+                src="#ar-video"
+                position="0 0.1 0"
+                rotation="-90 0 0"
+                width="2"
+                height="1.5"
+              ></a-video>
+            </a-marker>
+          </>
+        )}
 
         <a-entity camera></a-entity>
       </a-scene>
-
-      <div className="debug-info">
-        <p>Camera Status: {navigator.mediaDevices ? "Supported" : "Not Supported"}</p>
-        <p>Marker Status: {isMarkerFound ? "Found" : "Not Found"}</p>
-        <p>Video URL: {currentContent.videoUrl ? "Loaded" : "Not Loaded"}</p>
-      </div>
-    </div>
+    </>
   );
 }
 
