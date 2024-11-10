@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { getStorage, ref, getDownloadURL } from 'firebase/storage';
@@ -22,19 +22,19 @@ const storage = getStorage(app);
 const TargetArea = ({ visible = true }) => (
   <div className="absolute inset-0 z-20 pointer-events-none flex items-center justify-center">
     <div className="relative">
-      {/* Target area frame */}
-      <div className="w-64 h-96 border-2 border-white rounded-lg relative">
-        {/* Corner indicators */}
-        <div className="absolute -left-2 -top-2 w-5 h-5 border-l-4 border-t-4 border-blue-500" />
-        <div className="absolute -right-2 -top-2 w-5 h-5 border-r-4 border-t-4 border-blue-500" />
-        <div className="absolute -left-2 -bottom-2 w-5 h-5 border-l-4 border-b-4 border-blue-500" />
-        <div className="absolute -right-2 -bottom-2 w-5 h-5 border-r-4 border-b-4 border-blue-500" />
+      {/* Target area frame with red border */}
+      <div className="w-64 h-96 border-2 border-red-500 rounded-lg relative">
+        {/* Corner indicators in red */}
+        <div className="absolute -left-2 -top-2 w-5 h-5 border-l-4 border-t-4 border-red-500" />
+        <div className="absolute -right-2 -top-2 w-5 h-5 border-r-4 border-t-4 border-red-500" />
+        <div className="absolute -left-2 -bottom-2 w-5 h-5 border-l-4 border-b-4 border-red-500" />
+        <div className="absolute -right-2 -bottom-2 w-5 h-5 border-r-4 border-b-4 border-red-500" />
         
         {/* Center crosshair */}
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="w-8 h-8">
-            <div className="absolute top-1/2 left-0 w-full h-0.5 bg-white opacity-50" />
-            <div className="absolute top-0 left-1/2 w-0.5 h-full bg-white opacity-50" />
+            <div className="absolute top-1/2 left-0 w-full h-0.5 bg-red-500 opacity-50" />
+            <div className="absolute top-0 left-1/2 w-0.5 h-full bg-red-500 opacity-50" />
           </div>
         </div>
 
@@ -49,130 +49,16 @@ const TargetArea = ({ visible = true }) => (
   </div>
 );
 
-const StatusMessage = ({ status }) => {
-  let message = '';
-  let bgColor = 'bg-yellow-500';
-
-  switch (status) {
-    case 'aligning':
-      message = 'Align image within the target area';
-      break;
-    case 'aligned':
-      message = 'Hold steady - Initializing AR';
-      bgColor = 'bg-blue-500';
-      break;
-    case 'playing':
-      message = 'AR Video Playing';
-      bgColor = 'bg-green-500';
-      break;
-    default:
-      return null;
-  }
-
-  return (
-    <div className={`absolute top-4 left-1/2 transform -translate-x-1/2 z-30 ${bgColor} px-4 py-2 rounded-full text-white text-sm`}>
-      {message}
-    </div>
-  );
-};
-
 const ARViewer = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
-  const [cameraActive, setCameraActive] = useState(false);
   const [targetLocked, setTargetLocked] = useState(false);
   const [videoPlaying, setVideoPlaying] = useState(false);
-  const [status, setStatus] = useState('aligning');
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const streamRef = useRef(null);
 
-  // Initialize camera
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: 'environment',
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
-        }
-      });
-      
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play();
-        setCameraActive(true);
-        setLoading(false);
-        initializeImageTracking();
-      }
-    } catch (err) {
-      setError('Failed to access camera: ' + err.message);
-      setLoading(false);
-    }
-  };
-
-  // Track image in target area
-  const initializeImageTracking = () => {
-    if (!canvasRef.current || !videoRef.current) return;
-
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
-    
-    // Set canvas size to match video
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-
-    // Define target area in center of screen
-    const targetArea = {
-      x: (canvas.width - 256) / 2,  // 256px = 16rem (w-64)
-      y: (canvas.height - 384) / 2, // 384px = 24rem (h-96)
-      width: 256,
-      height: 384
-    };
-
-    const processFrame = () => {
-      // Draw current camera frame
-      context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-
-      // Get image data from target area
-      const imageData = context.getImageData(
-        targetArea.x, 
-        targetArea.y, 
-        targetArea.width, 
-        targetArea.height
-      );
-
-      // Simple movement detection
-      const hasContent = detectImageContent(imageData);
-      
-      if (hasContent && !targetLocked) {
-        setStatus('aligned');
-        // Start a timer to ensure image is steady
-        setTimeout(() => {
-          setTargetLocked(true);
-          setStatus('playing');
-          playARVideo();
-        }, 1000);
-      } else if (!hasContent && targetLocked) {
-        setTargetLocked(false);
-        setVideoPlaying(false);
-        setStatus('aligning');
-        if (overlayVideoRef.current) {
-          overlayVideoRef.current.pause();
-        }
-      }
-
-      // Continue processing frames
-      requestAnimationFrame(processFrame);
-    };
-
-    requestAnimationFrame(processFrame);
-  };
-
-  // Detect if there's meaningful content in the target area
-  const detectImageContent = (imageData) => {
+  const detectImageContent = useCallback((imageData) => {
     const data = imageData.data;
     let totalBrightness = 0;
     let totalPixels = data.length / 4;
@@ -183,20 +69,95 @@ const ARViewer = () => {
     }
 
     const averageBrightness = totalBrightness / totalPixels;
-    const hasContent = averageBrightness > 30 && averageBrightness < 225;
+    return averageBrightness > 30 && averageBrightness < 225;
+  }, []);
 
-    return hasContent;
-  };
-
-  // Play AR video over detected image
-  const playARVideo = () => {
+  const playARVideo = useCallback(() => {
     if (!overlayVideoRef.current || videoPlaying) return;
-
     overlayVideoRef.current.play();
     setVideoPlaying(true);
-  };
+  }, [videoPlaying]);
 
-  // Fetch video content
+  const initializeImageTracking = useCallback(() => {
+    if (!canvasRef.current || !videoRef.current) return;
+
+    const canvas = canvasRef.current;
+    const context = canvas.getContext('2d');
+    
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    const targetArea = {
+      x: (canvas.width - 256) / 2,
+      y: (canvas.height - 384) / 2,
+      width: 256,
+      height: 384
+    };
+
+    const processFrame = () => {
+      if (!canvasRef.current || !videoRef.current) return;
+      
+      context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+      const imageData = context.getImageData(
+        targetArea.x, 
+        targetArea.y, 
+        targetArea.width, 
+        targetArea.height
+      );
+
+      const hasContent = detectImageContent(imageData);
+      
+      if (hasContent && !targetLocked) {
+        setTimeout(() => {
+          setTargetLocked(true);
+          playARVideo();
+        }, 1000);
+      } else if (!hasContent && targetLocked) {
+        setTargetLocked(false);
+        setVideoPlaying(false);
+        if (overlayVideoRef.current) {
+          overlayVideoRef.current.pause();
+        }
+      }
+
+      requestAnimationFrame(processFrame);
+    };
+
+    requestAnimationFrame(processFrame);
+  }, [detectImageContent, playARVideo, targetLocked]);
+
+  // Auto-start camera on component mount
+  useEffect(() => {
+    const startCamera = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'environment',
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          }
+        });
+        
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play();
+          initializeImageTracking();
+        }
+      } catch (err) {
+        setError('Failed to access camera: ' + err.message);
+      }
+    };
+
+    startCamera();
+
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [initializeImageTracking]);
+
   useEffect(() => {
     const fetchARContent = () => {
       const q = query(
@@ -216,10 +177,8 @@ const ARViewer = () => {
               overlayVideoRef.current.src = videoUrl;
               overlayVideoRef.current.load();
             }
-            setLoading(false);
           } catch (error) {
             setError('Failed to load video content');
-            setLoading(false);
           }
         }
       });
@@ -229,22 +188,12 @@ const ARViewer = () => {
     return () => unsubscribe();
   }, []);
 
-  // Cleanup
-  useEffect(() => {
-    return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-      }
-    };
-  }, []);
-
   return (
     <div className="relative h-screen w-full overflow-hidden bg-black">
       {/* Main camera view */}
       <video
         ref={videoRef}
         playsInline
-        muted
         className="absolute inset-0 h-full w-full object-cover"
       />
 
@@ -255,11 +204,9 @@ const ARViewer = () => {
       />
 
       {/* Target area overlay */}
-      {cameraActive && !targetLocked && (
-        <TargetArea />
-      )}
+      {!targetLocked && <TargetArea />}
 
-      {/* AR Video (positioned over target when active) */}
+      {/* AR Video */}
       <video
         ref={overlayVideoRef}
         className={`absolute z-20 ${targetLocked ? 'opacity-100' : 'opacity-0'}`}
@@ -267,34 +214,15 @@ const ARViewer = () => {
           top: '50%',
           left: '50%',
           transform: 'translate(-50%, -50%)',
-          width: '256px', // Match target area width
-          height: '384px', // Match target area height
+          width: '100%',
+          height: 'auto',
+          maxWidth: '90vw',
+          maxHeight: '90vh',
+          objectFit: 'contain'
         }}
         playsInline
         loop
       />
-
-      {/* Status message */}
-      <StatusMessage status={status} />
-
-      {/* Loading state */}
-      {loading && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-          <div className="text-white text-xl">Loading...</div>
-        </div>
-      )}
-
-      {/* Start button */}
-      {!cameraActive && !loading && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center">
-          <button
-            onClick={startCamera}
-            className="bg-blue-500 text-white px-6 py-3 rounded-lg text-lg font-semibold hover:bg-blue-600"
-          >
-            Start AR Experience
-          </button>
-        </div>
-      )}
 
       {/* Error message */}
       {error && (
