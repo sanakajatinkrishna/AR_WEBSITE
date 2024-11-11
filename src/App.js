@@ -1,10 +1,8 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
-import * as tf from '@tensorflow/tfjs';
-import * as mobilenet from '@tensorflow-models/mobilenet';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, getDocs } from 'firebase/firestore';
+import { getFirestore, collection, doc, getDoc } from 'firebase/firestore';
 
-// Firebase configuration
+// Firebase Configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -21,239 +19,234 @@ const db = getFirestore(app);
 
 const ARViewer = () => {
   const videoRef = useRef(null);
-  const containerRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const animationFrameRef = useRef(null);
-  
-  const [model, setModel] = useState(null);
+  const trackedPositionRef = useRef({ x: 50, y: 50 });
+
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
-  const [isScanning, setIsScanning] = useState(false);
-  const [referenceImages, setReferenceImages] = useState([]);
-  const [scanningStatus, setScanningStatus] = useState({
-    modelReady: false,
-    videoReady: false,
-    imagesLoaded: false,
-    canvasReady: false
-  });
+  const [videoUrl, setVideoUrl] = useState(null);
+  const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  const [isCanvasDetected, setIsCanvasDetected] = useState(false);
 
-  // Initialize TensorFlow
-  useEffect(() => {
-    const initializeTF = async () => {
-      try {
-        setDebugInfo('Loading TensorFlow...');
-        await tf.ready();
-        await tf.setBackend('webgl');
-        const loadedModel = await mobilenet.load();
-        setModel(loadedModel);
-        setScanningStatus(prev => ({ ...prev, modelReady: true }));
-        setDebugInfo('TensorFlow ready');
-        setIsLoading(false);
-      } catch (error) {
-        console.error('TensorFlow initialization error:', error);
-        setDebugInfo(`TensorFlow error: ${error.message}`);
+  // Detect canvas in the frame
+  const detectCanvas = useCallback((imageData) => {
+    const width = imageData.width;
+    const height = imageData.height;
+    
+    let totalR = 0, totalG = 0, totalB = 0;
+    let samples = 0;
+
+    // Sample pixels for average color
+    for (let y = 0; y < height; y += 4) {
+      for (let x = 0; x < width; x += 4) {
+        const i = (y * width + x) * 4;
+        totalR += imageData.data[i];
+        totalG += imageData.data[i + 1];
+        totalB += imageData.data[i + 2];
+        samples++;
       }
-    };
+    }
 
-    initializeTF();
-  }, []);
+    const avgR = totalR / samples;
+    const avgG = totalG / samples;
+    const avgB = totalB / samples;
 
-  // Load content from Firebase
-  useEffect(() => {
-    const loadARContent = async () => {
-      setDebugInfo('Loading content from Firebase...');
-      try {
-        const querySnapshot = await getDocs(collection(db, 'arContent'));
-        console.log('Found Firebase documents:', querySnapshot.size);
-        
-        if (querySnapshot.size === 0) {
-          setDebugInfo('No images found in Firebase');
-          return;
+    // Check if significant content is present
+    const hasContent = (avgR > 30 || avgG > 30 || avgB > 30) && 
+                      (avgR < 240 || avgG < 240 || avgB < 240);
+
+    if (hasContent) {
+      // Find content boundaries
+      let left = width, right = 0, top = height, bottom = 0;
+
+      for (let y = 0; y < height; y += 2) {
+        for (let x = 0; x < width; x += 2) {
+          const i = (y * width + x) * 4;
+          const r = imageData.data[i];
+          const g = imageData.data[i + 1];
+          const b = imageData.data[i + 2];
+
+          if (Math.abs(r - avgR) > 20 || Math.abs(g - avgG) > 20 || Math.abs(b - avgB) > 20) {
+            left = Math.min(left, x);
+            right = Math.max(right, x);
+            top = Math.min(top, y);
+            bottom = Math.max(bottom, y);
+          }
         }
-
-        const loadedImages = await Promise.all(
-          querySnapshot.docs.map(async (doc) => {
-            const data = doc.data();
-            console.log('Loading image for document:', doc.id, data);
-            
-            try {
-              const response = await fetch(data.imageUrl);
-              if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-              const blob = await response.blob();
-              const img = await createImageBitmap(blob);
-              console.log('Successfully loaded image for:', doc.id);
-              return {
-                id: doc.id,
-                imageUrl: data.imageUrl,
-                videoUrl: data.videoUrl,
-                bitmap: img
-              };
-            } catch (error) {
-              console.error('Error loading image for doc:', doc.id, error);
-              setDebugInfo(`Error loading image ${doc.id}: ${error.message}`);
-              return null;
-            }
-          })
-        );
-
-        const validImages = loadedImages.filter(img => img !== null);
-        console.log('Successfully loaded images:', validImages.length);
-        setReferenceImages(validImages);
-        setScanningStatus(prev => ({ ...prev, imagesLoaded: true }));
-        setDebugInfo(`Loaded ${validImages.length} images successfully`);
-        
-      } catch (error) {
-        console.error('Firebase loading error:', error);
-        setDebugInfo(`Firebase error: ${error.message}`);
       }
-    };
 
-    loadARContent();
+      const centerX = (left + right) / 2;
+      const centerY = (top + bottom) / 2;
+      const objWidth = right - left;
+      const objHeight = bottom - top;
+
+      // Convert to percentages
+      const posX = (centerX / width) * 100;
+      const posY = (centerY / height) * 100;
+
+      // Apply smoothing
+      trackedPositionRef.current.x = trackedPositionRef.current.x * 0.8 + posX * 0.2;
+      trackedPositionRef.current.y = trackedPositionRef.current.y * 0.8 + posY * 0.2;
+
+      return {
+        position: { x: trackedPositionRef.current.x, y: trackedPositionRef.current.y },
+        size: { width: objWidth, height: objHeight },
+        detected: true
+      };
+    }
+
+    return { detected: false };
   }, []);
 
-  const compareImages = useCallback(async (capturedImage, referenceImage) => {
-    if (!model) return 0;
+  // Handle video playback
+  const startVideo = useCallback(async () => {
+    if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
     try {
-      return tf.tidy(() => {
-        const captured = tf.browser.fromPixels(capturedImage);
-        const reference = tf.browser.fromPixels(referenceImage);
-
-        const capturedResized = tf.image.resizeBilinear(captured, [224, 224]);
-        const referenceResized = tf.image.resizeBilinear(reference, [224, 224]);
-
-        const capturedNorm = capturedResized.toFloat().div(tf.scalar(255));
-        const referenceNorm = referenceResized.toFloat().div(tf.scalar(255));
-
-        const capturedFeatures = model.infer(capturedNorm, true);
-        const referenceFeatures = model.infer(referenceNorm, true);
-
-        // Calculate cosine similarity
-        const a = capturedFeatures.reshape([capturedFeatures.size]);
-        const b = referenceFeatures.reshape([referenceFeatures.size]);
-        const normA = a.norm();
-        const normB = b.norm();
-        const similarity = a.dot(b).div(normA.mul(normB));
-
-        return similarity.dataSync()[0];
-      });
+      overlayVideoRef.current.src = videoUrl;
+      overlayVideoRef.current.muted = false;
+      await overlayVideoRef.current.play();
+      setIsVideoPlaying(true);
+      setDebugInfo('Video playing with sound');
     } catch (error) {
-      console.error('Error comparing images:', error);
-      return 0;
+      console.error('Video playback error:', error);
+      setDebugInfo('Click anywhere to play video with sound');
+      
+      const playOnClick = () => {
+        if (overlayVideoRef.current) {
+          overlayVideoRef.current.play()
+            .then(() => {
+              setIsVideoPlaying(true);
+              setDebugInfo('Video playing with sound');
+              document.removeEventListener('click', playOnClick);
+            })
+            .catch(console.error);
+        }
+      };
+      document.addEventListener('click', playOnClick);
     }
-  }, [model]);
+  }, [videoUrl, isVideoPlaying]);
 
-  const scanFrame = useCallback(async () => {
+  // Process frames
+  const processFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
-    if (!model || !video || !canvas || referenceImages.length === 0) {
-      const reasons = [];
-      if (!model) reasons.push('Model not ready');
-      if (!video) reasons.push('Video not ready');
-      if (!canvas) reasons.push('Canvas not ready');
-      if (referenceImages.length === 0) reasons.push('No reference images');
-      console.log('Scanning prerequisites not met:', reasons.join(', '));
-      animationFrameRef.current = requestAnimationFrame(scanFrame);
+    if (!video || !canvas) {
+      animationFrameRef.current = requestAnimationFrame(processFrame);
       return;
     }
 
-    if (!isScanning) {
-      setIsScanning(true);
-      console.log('Scanning started');
-    }
+    const context = canvas.getContext('2d', { 
+      willReadFrequently: true,
+      alpha: false 
+    });
 
-    try {
-      const context = canvas.getContext('2d');
-      
-      // Make sure video has valid dimensions
-      if (video.videoWidth === 0 || video.videoHeight === 0) {
-        console.log('Video dimensions not ready');
-        animationFrameRef.current = requestAnimationFrame(scanFrame);
-        return;
-      }
-
-      // Set canvas size to match video
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
-
-      // Draw video frame to canvas
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      // Get the center portion of the frame
-      const centerWidth = canvas.width * 0.5;
-      const centerHeight = canvas.height * 0.5;
-      const x = (canvas.width - centerWidth) / 2;
-      const y = (canvas.height - centerHeight) / 2;
+    }
+    
+    context.drawImage(video, 0, 0);
+    
+    // Get center region
+    const centerWidth = canvas.width * 0.5;
+    const centerHeight = canvas.height * 0.5;
+    const x = (canvas.width - centerWidth) / 2;
+    const y = (canvas.height - centerHeight) / 2;
+    
+    const imageData = context.getImageData(x, y, centerWidth, centerHeight);
+    const result = detectCanvas(imageData);
+    
+    if (result.detected) {
+      setCanvasPosition(result.position);
+      setCanvasSize(result.size);
       
-      const frameData = context.getImageData(x, y, centerWidth, centerHeight);
-
-      // Compare with each reference image
-      for (const refImage of referenceImages) {
-        const similarity = await compareImages(frameData, refImage.bitmap);
-        console.log(`Similarity with ${refImage.id}:`, similarity);
-        setDebugInfo(`Scanning... Similarity with ${refImage.id}: ${(similarity * 100).toFixed(1)}%`);
-
-        if (similarity > 0.6) { // Lowered threshold for testing
-          console.log('Match found!', refImage.id, similarity);
-          if (overlayVideoRef.current) {
-            overlayVideoRef.current.src = refImage.videoUrl;
-            try {
-              await overlayVideoRef.current.play();
-              setIsVideoPlaying(true);
-              setDebugInfo(`Playing video for ${refImage.id}`);
-            } catch (error) {
-              console.error('Video playback error:', error);
-              setDebugInfo(`Video error: ${error.message}`);
-            }
-          }
-          break;
-        }
+      if (!isCanvasDetected) {
+        setIsCanvasDetected(true);
+        startVideo();
       }
-    } catch (error) {
-      console.error('Scan frame error:', error);
-      setDebugInfo(`Scan error: ${error.message}`);
+    } else if (isCanvasDetected) {
+      setIsCanvasDetected(false);
     }
 
-    animationFrameRef.current = requestAnimationFrame(scanFrame);
-  }, [model, referenceImages, compareImages, isScanning]);
+    animationFrameRef.current = requestAnimationFrame(processFrame);
+  }, [detectCanvas, startVideo, isCanvasDetected]);
 
-  // Start camera
+  // Load content from URL parameter
   useEffect(() => {
-    if (isLoading) return;
+    const loadContent = async () => {
+      try {
+        const urlParams = new URLSearchParams(window.location.search);
+        const contentId = urlParams.get('id');
 
-    let videoElement = null;
-    let stream = null;
+        if (!contentId) {
+          const snapshot = await collection(db, 'arContent').limit(1).get();
+          if (!snapshot.empty) {
+            const doc = snapshot.docs[0];
+            const data = doc.data();
+            setVideoUrl(data.videoUrl);
+            setDebugInfo('Ready - Detecting canvas');
+          } else {
+            setDebugInfo('No content found');
+          }
+        } else {
+          const docRef = doc(db, 'arContent', contentId);
+          const docSnap = await getDoc(docRef);
+
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            setVideoUrl(data.videoUrl);
+            setDebugInfo('Ready - Detecting canvas');
+          } else {
+            setDebugInfo('Content not found');
+          }
+        }
+      } catch (error) {
+        console.error('Error loading content:', error);
+        setDebugInfo(`Loading error: ${error.message}`);
+      }
+    };
+
+    loadContent();
+  }, []);
+
+  // Initialize camera
+  useEffect(() => {
+    let isComponentMounted = true;
+    let currentStream = null;
 
     const startCamera = async () => {
       try {
-        setDebugInfo('Requesting camera access...');
-        stream = await navigator.mediaDevices.getUserMedia({
+        const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
             width: { ideal: 1280 },
-            height: { ideal: 720 }
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
           }
         });
 
+        if (!isComponentMounted) return;
+
+        const videoTrack = stream.getVideoTracks()[0];
+        await videoTrack.applyConstraints({
+          advanced: [
+            { exposureMode: "continuous" },
+            { focusMode: "continuous" },
+            { whiteBalanceMode: "continuous" }
+          ]
+        }).catch(() => {});
+
+        currentStream = stream;
         if (videoRef.current) {
-          videoElement = videoRef.current;
-          videoElement.srcObject = stream;
-          videoElement.onloadedmetadata = () => {
-            videoElement.play()
-              .then(() => {
-                setScanningStatus(prev => ({ ...prev, videoReady: true }));
-                setDebugInfo('Camera ready, starting scan...');
-                console.log('Starting scan...');
-                requestAnimationFrame(scanFrame);
-              })
-              .catch(error => {
-                console.error('Error playing video:', error);
-                setDebugInfo(`Video error: ${error.message}`);
-              });
-          };
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+          setDebugInfo('Camera ready - Show canvas');
+          animationFrameRef.current = requestAnimationFrame(processFrame);
         }
       } catch (error) {
         console.error('Camera error:', error);
@@ -264,115 +257,97 @@ const ARViewer = () => {
     startCamera();
 
     return () => {
+      isComponentMounted = false;
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
-      if (videoElement?.srcObject) {
-        videoElement.srcObject = null;
+      if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
       }
     };
-  }, [isLoading, scanFrame]);
-
-  // Monitor scanning status
-  useEffect(() => {
-    const { modelReady, videoReady, imagesLoaded } = scanningStatus;
-    const readyStatus = [];
-    
-    if (!modelReady) readyStatus.push('Waiting for TensorFlow');
-    if (!videoReady) readyStatus.push('Waiting for camera');
-    if (!imagesLoaded) readyStatus.push('Waiting for images');
-    
-    if (readyStatus.length > 0) {
-      setDebugInfo(`Status: ${readyStatus.join(', ')}`);
-    } else {
-      setDebugInfo('All systems ready - Scanning active');
-    }
-  }, [scanningStatus]);
+  }, [processFrame]);
 
   return (
-    <div ref={containerRef} style={{ position: 'fixed', inset: 0, backgroundColor: 'black' }}>
+    <div style={styles.container}>
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        style={{
-          position: 'absolute',
-          width: '100%',
-          height: '100%',
-          objectFit: 'cover'
-        }}
+        style={styles.video}
       />
 
       <canvas
         ref={canvasRef}
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: '100%',
-          height: '100%',
-          display: 'none'
-        }}
+        style={styles.canvas}
       />
 
-      {isVideoPlaying && (
+      {videoUrl && (
         <video
           ref={overlayVideoRef}
           style={{
-            position: 'absolute',
-            top: '50%',
-            left: '50%',
-            transform: 'translate(-50%, -50%)',
-            width: '20vw',
-            height: '50vh',
-            objectFit: 'contain',
-            zIndex: 20
+            ...styles.overlayVideo,
+            top: `${canvasPosition.y}%`,
+            left: `${canvasPosition.x}%`,
+            width: `${Math.min(canvasSize.width * 1.2, window.innerWidth * 0.8)}px`,
+            height: `${Math.min(canvasSize.height * 1.2, window.innerHeight * 0.8)}px`,
           }}
-          autoPlay
           playsInline
           loop
+          muted={false}
+          controls={false}
         />
       )}
 
-      <div
-        style={{
-          position: 'absolute',
-          top: '50%',
-          left: '50%',
-          transform: 'translate(-50%, -50%)',
-          border: `3px solid ${isScanning ? '#00ff00' : '#ff0000'}`,
-          width: '50vw',
-          height: '50vh',
-          zIndex: 10
-        }}
-      />
-
-      {/* Debug Panel */}
-      <div
-        style={{
-          position: 'absolute',
-          top: 20,
-          left: 20,
-          backgroundColor: 'rgba(0,0,0,0.7)',
-          color: 'white',
-          padding: '10px',
-          borderRadius: '5px',
-          zIndex: 30
-        }}
-      >
+      <div style={styles.debugInfo}>
         <div>Status: {debugInfo}</div>
-        <div>Images Loaded: {referenceImages.length}</div>
-        <div>Model Ready: {scanningStatus.modelReady ? 'Yes' : 'No'}</div>
-        <div>Camera Ready: {scanningStatus.videoReady ? 'Yes' : 'No'}</div>
-        <div>Images Ready: {scanningStatus.imagesLoaded ? 'Yes' : 'No'}</div>
-        <div>Scanning Active: {isScanning ? 'Yes' : 'No'}</div>
+        <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
+        <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
+        <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
       </div>
     </div>
   );
+};
+
+const styles = {
+  container: {
+    position: 'fixed',
+    inset: 0,
+    backgroundColor: 'black',
+    overflow: 'hidden'
+  },
+  video: {
+    position: 'absolute',
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover'
+  },
+  canvas: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
+    display: 'none'
+  },
+  overlayVideo: {
+    position: 'absolute',
+    transform: 'translate(-50%, -50%)',
+    objectFit: 'contain',
+    zIndex: 20,
+    transition: 'all 0.1s ease-out'
+  },
+  debugInfo: {
+    position: 'absolute',
+    top: 20,
+    left: 20,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    color: 'white',
+    padding: '10px',
+    borderRadius: '5px',
+    zIndex: 30,
+    fontSize: '14px'
+  }
 };
 
 export default ARViewer;
