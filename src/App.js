@@ -24,31 +24,33 @@ const ARViewer = () => {
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
+  const animationFrameRef = useRef(null);
   
   const [model, setModel] = useState(null);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
+  const [isScanning, setIsScanning] = useState(false);
   const [referenceImages, setReferenceImages] = useState([]);
-  const [scanningStarted, setScanningStarted] = useState(false);
+  const [scanningStatus, setScanningStatus] = useState({
+    modelReady: false,
+    videoReady: false,
+    imagesLoaded: false,
+    canvasReady: false
+  });
 
   // Initialize TensorFlow
   useEffect(() => {
-    let isMounted = true;
-
     const initializeTF = async () => {
       try {
         setDebugInfo('Loading TensorFlow...');
         await tf.ready();
         await tf.setBackend('webgl');
-        console.log('TensorFlow initialized');
-        
         const loadedModel = await mobilenet.load();
-        console.log('MobileNet model loaded');
-        
-        if (isMounted) {
-          setModel(loadedModel);
-          setDebugInfo('TensorFlow & Model Ready');
-        }
+        setModel(loadedModel);
+        setScanningStatus(prev => ({ ...prev, modelReady: true }));
+        setDebugInfo('TensorFlow ready');
+        setIsLoading(false);
       } catch (error) {
         console.error('TensorFlow initialization error:', error);
         setDebugInfo(`TensorFlow error: ${error.message}`);
@@ -56,47 +58,52 @@ const ARViewer = () => {
     };
 
     initializeTF();
-    return () => { isMounted = false; };
   }, []);
 
   // Load content from Firebase
   useEffect(() => {
-    let isMounted = true;
-
     const loadARContent = async () => {
+      setDebugInfo('Loading content from Firebase...');
       try {
-        setDebugInfo('Loading Firebase content...');
         const querySnapshot = await getDocs(collection(db, 'arContent'));
-        console.log('Firebase docs found:', querySnapshot.size);
-
-        const loadPromises = querySnapshot.docs.map(async (doc) => {
-          const data = doc.data();
-          try {
-            console.log('Loading image for:', doc.id, data.imageUrl);
-            const response = await fetch(data.imageUrl);
-            const blob = await response.blob();
-            const img = await createImageBitmap(blob);
-            console.log('Image loaded successfully for:', doc.id);
-            return {
-              id: doc.id,
-              imageUrl: data.imageUrl,
-              videoUrl: data.videoUrl,
-              bitmap: img
-            };
-          } catch (error) {
-            console.error('Error loading image:', doc.id, error);
-            return null;
-          }
-        });
-
-        const results = await Promise.all(loadPromises);
-        const validImages = results.filter(Boolean);
+        console.log('Found Firebase documents:', querySnapshot.size);
         
-        if (isMounted) {
-          console.log('Valid images loaded:', validImages.length);
-          setReferenceImages(validImages);
-          setDebugInfo(`Loaded ${validImages.length} reference images`);
+        if (querySnapshot.size === 0) {
+          setDebugInfo('No images found in Firebase');
+          return;
         }
+
+        const loadedImages = await Promise.all(
+          querySnapshot.docs.map(async (doc) => {
+            const data = doc.data();
+            console.log('Loading image for document:', doc.id, data);
+            
+            try {
+              const response = await fetch(data.imageUrl);
+              if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+              const blob = await response.blob();
+              const img = await createImageBitmap(blob);
+              console.log('Successfully loaded image for:', doc.id);
+              return {
+                id: doc.id,
+                imageUrl: data.imageUrl,
+                videoUrl: data.videoUrl,
+                bitmap: img
+              };
+            } catch (error) {
+              console.error('Error loading image for doc:', doc.id, error);
+              setDebugInfo(`Error loading image ${doc.id}: ${error.message}`);
+              return null;
+            }
+          })
+        );
+
+        const validImages = loadedImages.filter(img => img !== null);
+        console.log('Successfully loaded images:', validImages.length);
+        setReferenceImages(validImages);
+        setScanningStatus(prev => ({ ...prev, imagesLoaded: true }));
+        setDebugInfo(`Loaded ${validImages.length} images successfully`);
+        
       } catch (error) {
         console.error('Firebase loading error:', error);
         setDebugInfo(`Firebase error: ${error.message}`);
@@ -104,145 +111,186 @@ const ARViewer = () => {
     };
 
     loadARContent();
-    return () => { isMounted = false; };
   }, []);
 
-  const startVideoStream = useCallback(async () => {
+  const compareImages = useCallback(async (capturedImage, referenceImage) => {
+    if (!model) return 0;
+
     try {
-      setDebugInfo('Requesting camera access...');
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        }
+      return tf.tidy(() => {
+        const captured = tf.browser.fromPixels(capturedImage);
+        const reference = tf.browser.fromPixels(referenceImage);
+
+        const capturedResized = tf.image.resizeBilinear(captured, [224, 224]);
+        const referenceResized = tf.image.resizeBilinear(reference, [224, 224]);
+
+        const capturedNorm = capturedResized.toFloat().div(tf.scalar(255));
+        const referenceNorm = referenceResized.toFloat().div(tf.scalar(255));
+
+        const capturedFeatures = model.infer(capturedNorm, true);
+        const referenceFeatures = model.infer(referenceNorm, true);
+
+        // Calculate cosine similarity
+        const a = capturedFeatures.reshape([capturedFeatures.size]);
+        const b = referenceFeatures.reshape([referenceFeatures.size]);
+        const normA = a.norm();
+        const normB = b.norm();
+        const similarity = a.dot(b).div(normA.mul(normB));
+
+        return similarity.dataSync()[0];
       });
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-        console.log('Camera stream started');
-        setDebugInfo('Camera ready');
-        return true;
-      }
     } catch (error) {
-      console.error('Camera access error:', error);
-      setDebugInfo(`Camera error: ${error.message}`);
+      console.error('Error comparing images:', error);
+      return 0;
     }
-    return false;
-  }, []);
+  }, [model]);
 
-  const processFrame = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current || !model || referenceImages.length === 0) {
-      return;
-    }
-
+  const scanFrame = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
 
-    // Ensure video is playing and has dimensions
-    if (video.readyState !== video.HAVE_ENOUGH_DATA) {
-      console.log('Video not ready');
+    if (!model || !video || !canvas || referenceImages.length === 0) {
+      const reasons = [];
+      if (!model) reasons.push('Model not ready');
+      if (!video) reasons.push('Video not ready');
+      if (!canvas) reasons.push('Canvas not ready');
+      if (referenceImages.length === 0) reasons.push('No reference images');
+      console.log('Scanning prerequisites not met:', reasons.join(', '));
+      animationFrameRef.current = requestAnimationFrame(scanFrame);
       return;
     }
 
-    // Set canvas dimensions
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    // Draw current video frame
-    context.drawImage(video, 0, 0);
+    if (!isScanning) {
+      setIsScanning(true);
+      console.log('Scanning started');
+    }
 
     try {
-      // Convert frame to tensor
-      const tensor = tf.browser.fromPixels(canvas);
-      const resized = tf.image.resizeBilinear(tensor, [224, 224]);
-      const normalized = resized.toFloat().div(tf.scalar(255));
+      const context = canvas.getContext('2d');
       
-      // Get features
-      const features = model.infer(normalized, true);
-
-      // Check against reference images
-      for (const ref of referenceImages) {
-        const refTensor = tf.browser.fromPixels(ref.bitmap);
-        const refResized = tf.image.resizeBilinear(refTensor, [224, 224]);
-        const refNormalized = refResized.toFloat().div(tf.scalar(255));
-        const refFeatures = model.infer(refNormalized, true);
-
-        const similarity = tf.metrics.cosineProximity(features, refFeatures).dataSync()[0];
-        console.log(`Similarity with ${ref.id}:`, similarity);
-        setDebugInfo(`Scanning... Similarity: ${(Math.abs(similarity) * 100).toFixed(1)}%`);
-
-        if (Math.abs(similarity) > 0.6) {
-          console.log('Match found:', ref.id);
-          if (overlayVideoRef.current) {
-            overlayVideoRef.current.src = ref.videoUrl;
-            await overlayVideoRef.current.play();
-            setIsVideoPlaying(true);
-          }
-        }
-
-        // Cleanup
-        refTensor.dispose();
-        refResized.dispose();
-        refNormalized.dispose();
-        refFeatures.dispose();
-      }
-
-      // Cleanup
-      tensor.dispose();
-      resized.dispose();
-      normalized.dispose();
-      features.dispose();
-
-    } catch (error) {
-      console.error('Frame processing error:', error);
-    }
-  }, [model, referenceImages]);
-
-  // Start scanning
-  useEffect(() => {
-    let frameId = null;
-    let isActive = false;
-
-    const scan = async () => {
-      if (!isActive) return;
-      
-      await processFrame();
-      frameId = requestAnimationFrame(scan);
-    };
-
-    const startScanning = async () => {
-      if (scanningStarted || !model || referenceImages.length === 0) {
-        console.log('Scanning prerequisites not met:', {
-          scanningStarted,
-          modelLoaded: !!model,
-          imagesLoaded: referenceImages.length
-        });
+      // Make sure video has valid dimensions
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        console.log('Video dimensions not ready');
+        animationFrameRef.current = requestAnimationFrame(scanFrame);
         return;
       }
 
-      console.log('Starting scanner...');
-      const streamStarted = await startVideoStream();
+      // Set canvas size to match video
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+
+      // Draw video frame to canvas
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // Get the center portion of the frame
+      const centerWidth = canvas.width * 0.5;
+      const centerHeight = canvas.height * 0.5;
+      const x = (canvas.width - centerWidth) / 2;
+      const y = (canvas.height - centerHeight) / 2;
       
-      if (streamStarted) {
-        isActive = true;
-        setScanningStarted(true);
-        scan();
-        console.log('Scanner started successfully');
+      const frameData = context.getImageData(x, y, centerWidth, centerHeight);
+
+      // Compare with each reference image
+      for (const refImage of referenceImages) {
+        const similarity = await compareImages(frameData, refImage.bitmap);
+        console.log(`Similarity with ${refImage.id}:`, similarity);
+        setDebugInfo(`Scanning... Similarity with ${refImage.id}: ${(similarity * 100).toFixed(1)}%`);
+
+        if (similarity > 0.6) { // Lowered threshold for testing
+          console.log('Match found!', refImage.id, similarity);
+          if (overlayVideoRef.current) {
+            overlayVideoRef.current.src = refImage.videoUrl;
+            try {
+              await overlayVideoRef.current.play();
+              setIsVideoPlaying(true);
+              setDebugInfo(`Playing video for ${refImage.id}`);
+            } catch (error) {
+              console.error('Video playback error:', error);
+              setDebugInfo(`Video error: ${error.message}`);
+            }
+          }
+          break;
+        }
+      }
+    } catch (error) {
+      console.error('Scan frame error:', error);
+      setDebugInfo(`Scan error: ${error.message}`);
+    }
+
+    animationFrameRef.current = requestAnimationFrame(scanFrame);
+  }, [model, referenceImages, compareImages, isScanning]);
+
+  // Start camera
+  useEffect(() => {
+    if (isLoading) return;
+
+    let videoElement = null;
+    let stream = null;
+
+    const startCamera = async () => {
+      try {
+        setDebugInfo('Requesting camera access...');
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
+        });
+
+        if (videoRef.current) {
+          videoElement = videoRef.current;
+          videoElement.srcObject = stream;
+          videoElement.onloadedmetadata = () => {
+            videoElement.play()
+              .then(() => {
+                setScanningStatus(prev => ({ ...prev, videoReady: true }));
+                setDebugInfo('Camera ready, starting scan...');
+                console.log('Starting scan...');
+                requestAnimationFrame(scanFrame);
+              })
+              .catch(error => {
+                console.error('Error playing video:', error);
+                setDebugInfo(`Video error: ${error.message}`);
+              });
+          };
+        }
+      } catch (error) {
+        console.error('Camera error:', error);
+        setDebugInfo(`Camera error: ${error.message}`);
       }
     };
 
-    startScanning();
+    startCamera();
 
     return () => {
-      isActive = false;
-      if (frameId) {
-        cancelAnimationFrame(frameId);
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+      if (videoElement?.srcObject) {
+        videoElement.srcObject = null;
       }
     };
-  }, [model, referenceImages, processFrame, startVideoStream, scanningStarted]);
+  }, [isLoading, scanFrame]);
+
+  // Monitor scanning status
+  useEffect(() => {
+    const { modelReady, videoReady, imagesLoaded } = scanningStatus;
+    const readyStatus = [];
+    
+    if (!modelReady) readyStatus.push('Waiting for TensorFlow');
+    if (!videoReady) readyStatus.push('Waiting for camera');
+    if (!imagesLoaded) readyStatus.push('Waiting for images');
+    
+    if (readyStatus.length > 0) {
+      setDebugInfo(`Status: ${readyStatus.join(', ')}`);
+    } else {
+      setDebugInfo('All systems ready - Scanning active');
+    }
+  }, [scanningStatus]);
 
   return (
     <div ref={containerRef} style={{ position: 'fixed', inset: 0, backgroundColor: 'black' }}>
@@ -296,7 +344,7 @@ const ARViewer = () => {
           top: '50%',
           left: '50%',
           transform: 'translate(-50%, -50%)',
-          border: `3px solid ${scanningStarted ? '#00ff00' : '#ff0000'}`,
+          border: `3px solid ${isScanning ? '#00ff00' : '#ff0000'}`,
           width: '50vw',
           height: '50vh',
           zIndex: 10
@@ -313,16 +361,15 @@ const ARViewer = () => {
           color: 'white',
           padding: '10px',
           borderRadius: '5px',
-          zIndex: 30,
-          fontSize: '14px',
-          fontFamily: 'monospace'
+          zIndex: 30
         }}
       >
         <div>Status: {debugInfo}</div>
-        <div>Model Loaded: {model ? 'Yes' : 'No'}</div>
         <div>Images Loaded: {referenceImages.length}</div>
-        <div>Camera Active: {videoRef.current?.readyState === 4 ? 'Yes' : 'No'}</div>
-        <div>Scanning: {scanningStarted ? 'Yes' : 'No'}</div>
+        <div>Model Ready: {scanningStatus.modelReady ? 'Yes' : 'No'}</div>
+        <div>Camera Ready: {scanningStatus.videoReady ? 'Yes' : 'No'}</div>
+        <div>Images Ready: {scanningStatus.imagesLoaded ? 'Yes' : 'No'}</div>
+        <div>Scanning Active: {isScanning ? 'Yes' : 'No'}</div>
       </div>
     </div>
   );
