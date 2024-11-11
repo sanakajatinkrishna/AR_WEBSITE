@@ -84,8 +84,8 @@ const ARViewer = () => {
       >
         <div
           style={{
-            width: '50vw',
-            height: '20vh',
+            width: '20vw',
+            height: '50vh',
             border: '2px solid #ef4444',
             borderRadius: '8px',
             backgroundColor: 'transparent'
