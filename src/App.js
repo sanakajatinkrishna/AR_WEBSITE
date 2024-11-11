@@ -78,6 +78,9 @@ const ARViewer = () => {
         className="absolute inset-0 flex items-center justify-center"
         style={{
           position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
           zIndex: 20,
           pointerEvents: 'none'
         }}
