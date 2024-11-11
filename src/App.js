@@ -1,6 +1,7 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, doc, getDoc } from 'firebase/firestore';
+import { getStorage, ref, getDownloadURL } from 'firebase/storage';
+import { getFirestore, collection, getDocs } from 'firebase/firestore';
 
 // Firebase Configuration
 const firebaseConfig = {
@@ -16,6 +17,7 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+const storage = getStorage(app);
 
 const ARViewer = () => {
   const videoRef = useRef(null);
@@ -176,96 +178,145 @@ const ARViewer = () => {
     animationFrameRef.current = requestAnimationFrame(processFrame);
   }, [detectCanvas, startVideo, isCanvasDetected]);
 
-  // Load content from URL parameter
+  // Load video from Firebase
   useEffect(() => {
-    const loadContent = async () => {
+    const loadFirstVideo = async () => {
       try {
-        const urlParams = new URLSearchParams(window.location.search);
-        const contentId = urlParams.get('id');
-
-        if (!contentId) {
-          const snapshot = await collection(db, 'arContent').limit(1).get();
-          if (!snapshot.empty) {
-            const doc = snapshot.docs[0];
-            const data = doc.data();
-            setVideoUrl(data.videoUrl);
-            setDebugInfo('Ready - Detecting canvas');
-          } else {
-            setDebugInfo('No content found');
-          }
-        } else {
-          const docRef = doc(db, 'arContent', contentId);
-          const docSnap = await getDoc(docRef);
-
-          if (docSnap.exists()) {
-            const data = docSnap.data();
-            setVideoUrl(data.videoUrl);
-            setDebugInfo('Ready - Detecting canvas');
-          } else {
-            setDebugInfo('Content not found');
-          }
+        const arContentRef = collection(db, 'arContent');
+        const snapshot = await getDocs(arContentRef);
+        
+        if (snapshot.empty) {
+          setDebugInfo('No content found in Firestore');
+          return;
         }
+
+        const firstDoc = snapshot.docs[0];
+        const data = firstDoc.data();
+
+        if (data.videoPath) {
+          const videoRef = ref(storage, data.videoPath);
+          const url = await getDownloadURL(videoRef);
+          setVideoUrl(url);
+        } else {
+          setVideoUrl(data.videoUrl);
+        }
+        
+        setDebugInfo('Ready - Detecting canvas');
       } catch (error) {
-        console.error('Error loading content:', error);
+        console.error('Error loading video:', error);
         setDebugInfo(`Loading error: ${error.message}`);
       }
     };
 
-    loadContent();
+    loadFirstVideo();
   }, []);
 
   // Initialize camera
-  useEffect(() => {
-    let isComponentMounted = true;
-    let currentStream = null;
+// Initialize camera
+useEffect(() => {
+  let isComponentMounted = true;
+  let currentStream = null;
+  let videoElement = null; // Add variable for video element
 
-    const startCamera = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: 'environment',
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30 }
-          }
-        });
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30 }
+        }
+      });
 
-        if (!isComponentMounted) return;
+      if (!isComponentMounted) return;
 
-        const videoTrack = stream.getVideoTracks()[0];
-        await videoTrack.applyConstraints({
-          advanced: [
-            { exposureMode: "continuous" },
-            { focusMode: "continuous" },
-            { whiteBalanceMode: "continuous" }
-          ]
-        }).catch(() => {});
+      const videoTrack = stream.getVideoTracks()[0];
+      await videoTrack.applyConstraints({
+        advanced: [
+          { exposureMode: "continuous" },
+          { focusMode: "continuous" },
+          { whiteBalanceMode: "continuous" }
+        ]
+      }).catch(() => {});
 
-        currentStream = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
+      currentStream = stream;
+      if (videoRef.current) {
+        videoElement = videoRef.current; // Store reference to video element
+        videoElement.srcObject = stream;
+        await videoElement.play();
+        
+        if (isComponentMounted) {
           setDebugInfo('Camera ready - Show canvas');
           animationFrameRef.current = requestAnimationFrame(processFrame);
         }
-      } catch (error) {
-        console.error('Camera error:', error);
+      }
+    } catch (error) {
+      console.error('Camera error:', error);
+      if (isComponentMounted) {
         setDebugInfo(`Camera error: ${error.message}`);
       }
-    };
+    }
+  };
 
-    startCamera();
+  startCamera();
 
-    return () => {
-      isComponentMounted = false;
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-      if (currentStream) {
-        currentStream.getTracks().forEach(track => track.stop());
-      }
-    };
-  }, [processFrame]);
+  return () => {
+    isComponentMounted = false;
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+    }
+    if (currentStream) {
+      currentStream.getTracks().forEach(track => track.stop());
+    }
+    if (videoElement) { // Use stored video element reference
+      videoElement.srcObject = null;
+    }
+  };
+}, [processFrame]);
+
+  const styles = {
+    container: {
+      position: 'fixed',
+      inset: 0,
+      backgroundColor: 'black'
+    },
+    video: {
+      position: 'absolute',
+      width: '100%',
+      height: '100%',
+      objectFit: 'cover'
+    },
+    canvas: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      width: '100%',
+      height: '100%',
+      display: 'none'
+    },
+    overlayVideo: {
+      position: 'absolute',
+      top: `${canvasPosition.y}%`,
+      left: `${canvasPosition.x}%`,
+      transform: 'translate(-50%, -50%)',
+      width: `${Math.min(canvasSize.width * 1.2, 40)}vw`,
+      height: `${Math.min(canvasSize.height * 1.2, 40)}vh`,
+      objectFit: 'contain',
+      zIndex: 20,
+      transition: 'all 0.1s ease-out'
+    },
+    debugInfo: {
+      position: 'absolute',
+      top: 20,
+      left: 20,
+      backgroundColor: 'rgba(0,0,0,0.7)',
+      color: 'white',
+      padding: '10px',
+      borderRadius: '5px',
+      zIndex: 30
+    }
+  };
 
   return (
     <div style={styles.container}>
@@ -285,13 +336,8 @@ const ARViewer = () => {
       {videoUrl && (
         <video
           ref={overlayVideoRef}
-          style={{
-            ...styles.overlayVideo,
-            top: `${canvasPosition.y}%`,
-            left: `${canvasPosition.x}%`,
-            width: `${Math.min(canvasSize.width * 1.2, window.innerWidth * 0.8)}px`,
-            height: `${Math.min(canvasSize.height * 1.2, window.innerHeight * 0.8)}px`,
-          }}
+          style={styles.overlayVideo}
+          autoPlay
           playsInline
           loop
           muted={false}
@@ -307,47 +353,6 @@ const ARViewer = () => {
       </div>
     </div>
   );
-};
-
-const styles = {
-  container: {
-    position: 'fixed',
-    inset: 0,
-    backgroundColor: 'black',
-    overflow: 'hidden'
-  },
-  video: {
-    position: 'absolute',
-    width: '100%',
-    height: '100%',
-    objectFit: 'cover'
-  },
-  canvas: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: '100%',
-    height: '100%',
-    display: 'none'
-  },
-  overlayVideo: {
-    position: 'absolute',
-    transform: 'translate(-50%, -50%)',
-    objectFit: 'contain',
-    zIndex: 20,
-    transition: 'all 0.1s ease-out'
-  },
-  debugInfo: {
-    position: 'absolute',
-    top: 20,
-    left: 20,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    color: 'white',
-    padding: '10px',
-    borderRadius: '5px',
-    zIndex: 30,
-    fontSize: '14px'
-  }
 };
 
 export default ARViewer;
