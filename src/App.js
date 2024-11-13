@@ -1,4 +1,3 @@
-// App.js
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
@@ -25,17 +24,163 @@ const App = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
+  const markerImageRef = useRef(null);
+  const markerFeaturesRef = useRef(null);
   const animationFrameRef = useRef(null);
-  const trackedPositionRef = useRef({ x: 50, y: 50 });
+  const lastPositionRef = useRef({ x: 50, y: 50 });
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
+  const [markerUrl, setMarkerUrl] = useState(null);
   const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
-  const [isCanvasDetected, setIsCanvasDetected] = useState(false);
+  const [isMarkerDetected, setIsMarkerDetected] = useState(false);
 
-  // Load content based on key
+  // Calculate feature descriptor for matching
+  const calculateDescriptor = useCallback((data, width, x, y) => {
+    const descriptor = new Uint8Array(32);
+    const step = 4;
+    
+    for (let i = 0; i < 32; i++) {
+      const x1 = x + Math.cos(i * Math.PI / 16) * step;
+      const y1 = y + Math.sin(i * Math.PI / 16) * step;
+      const x2 = x - Math.cos(i * Math.PI / 16) * step;
+      const y2 = y - Math.sin(i * Math.PI / 16) * step;
+      
+      const i1 = ((y1 | 0) * width + (x1 | 0)) * 4;
+      const i2 = ((y2 | 0) * width + (x2 | 0)) * 4;
+      
+      descriptor[i] = (data[i1] + data[i1 + 1] + data[i1 + 2]) / 3 > 
+                     (data[i2] + data[i2 + 1] + data[i2 + 2]) / 3 ? 1 : 0;
+    }
+    
+    return descriptor;
+  }, []);
+
+  // Extract features from image data
+  const extractFeatures = useCallback((imageData) => {
+    const features = [];
+    const width = imageData.width;
+    const height = imageData.height;
+    const data = imageData.data;
+    const threshold = 30;
+    
+    // Sample points in a grid pattern for efficiency
+    for (let y = 20; y < height - 20; y += 10) {
+      for (let x = 20; x < width - 20; x += 10) {
+        const i = (y * width + x) * 4;
+        const centerValue = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        
+        // Calculate gradient
+        const dx = (data[i + 4] + data[i + 5] + data[i + 6]) / 3 - centerValue;
+        const dy = (data[i + width * 4] + data[i + width * 4 + 1] + data[i + width * 4 + 2]) / 3 - centerValue;
+        
+        // Store strong feature points
+        if (Math.abs(dx) > threshold || Math.abs(dy) > threshold) {
+          features.push({
+            x,
+            y,
+            value: centerValue,
+            descriptor: calculateDescriptor(data, width, x, y)
+          });
+        }
+      }
+    }
+    
+    return features;
+  }, [calculateDescriptor]);
+
+  // Load reference marker image and extract features
+  useEffect(() => {
+    if (!markerUrl) return;
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      
+      // Store marker features for matching
+      markerImageRef.current = img;
+      markerFeaturesRef.current = extractFeatures(ctx.getImageData(0, 0, img.width, img.height));
+    };
+    img.src = markerUrl;
+  }, [markerUrl, extractFeatures]);
+
+  // Match features between two sets
+  const matchFeatures = useCallback((features1, features2) => {
+    const matches = [];
+    const threshold = 0.7;
+    
+    for (const f1 of features1) {
+      let bestDist = Infinity;
+      let bestMatch = null;
+      
+      for (const f2 of features2) {
+        let dist = 0;
+        for (let i = 0; i < f1.descriptor.length; i++) {
+          if (f1.descriptor[i] !== f2.descriptor[i]) dist++;
+        }
+        
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestMatch = f2;
+        }
+      }
+      
+      if (bestDist < threshold * f1.descriptor.length) {
+        matches.push({ point1: f1, point2: bestMatch });
+      }
+    }
+    
+    return matches;
+  }, []);
+
+  // Calculate transformation from matches
+  const calculateTransform = useCallback((matches) => {
+    if (matches.length < 10) return null;
+    
+    // Calculate centroid
+    let sumX1 = 0, sumY1 = 0, sumX2 = 0, sumY2 = 0;
+    matches.forEach(m => {
+      sumX1 += m.point1.x;
+      sumY1 += m.point1.y;
+      sumX2 += m.point2.x;
+      sumY2 += m.point2.y;
+    });
+    
+    const centerX1 = sumX1 / matches.length;
+    const centerY1 = sumY1 / matches.length;
+    const centerX2 = sumX2 / matches.length;
+    const centerY2 = sumY2 / matches.length;
+    
+    // Calculate scale and rotation
+    let numerator = 0, denominator = 0;
+    matches.forEach(m => {
+      const dx1 = m.point1.x - centerX1;
+      const dy1 = m.point1.y - centerY1;
+      const dx2 = m.point2.x - centerX2;
+      const dy2 = m.point2.y - centerY2;
+      
+      numerator += dx1 * dx2 + dy1 * dy2;
+      denominator += dx1 * dx1 + dy1 * dy1;
+    });
+    
+    const scale = Math.sqrt(denominator ? numerator / denominator : 0);
+    
+    return {
+      x: centerX2,
+      y: centerY2,
+      scale: scale,
+      confidence: matches.length
+    };
+  }, []);
+
+  // Load content from Firebase
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -45,29 +190,21 @@ const App = () => {
 
       try {
         console.log('Loading content for key:', contentKey);
-        setDebugInfo('Verifying content...');
+        setDebugInfo('Loading content...');
 
-        const arContentRef = collection(db, 'arContent');
-        const q = query(
-          arContentRef,
-          where('contentKey', '==', contentKey),
-          where('isActive', '==', true)
-        );
-
+        const arContentRef = collection(db, 'arExperiences');
+        const q = query(arContentRef, where('experienceId', '==', contentKey));
         const snapshot = await getDocs(q);
         
         if (snapshot.empty) {
-          console.log('No content found');
-          setDebugInfo('Invalid or inactive content');
+          setDebugInfo('Content not found');
           return;
         }
 
-        const doc = snapshot.docs[0];
-        const data = doc.data();
-        console.log('Content found:', data);
-
+        const data = snapshot.docs[0].data();
         setVideoUrl(data.videoUrl);
-        setDebugInfo('Content loaded - Please show image');
+        setMarkerUrl(data.markerUrl);
+        setDebugInfo('Content loaded - Show marker image');
 
       } catch (error) {
         console.error('Content loading error:', error);
@@ -78,70 +215,7 @@ const App = () => {
     loadContent();
   }, [contentKey]);
 
-  const detectCanvas = useCallback((imageData) => {
-    const width = imageData.width;
-    const height = imageData.height;
-    
-    let totalR = 0, totalG = 0, totalB = 0;
-    let samples = 0;
-
-    for (let y = 0; y < height; y += 4) {
-      for (let x = 0; x < width; x += 4) {
-        const i = (y * width + x) * 4;
-        totalR += imageData.data[i];
-        totalG += imageData.data[i + 1];
-        totalB += imageData.data[i + 2];
-        samples++;
-      }
-    }
-
-    const avgR = totalR / samples;
-    const avgG = totalG / samples;
-    const avgB = totalB / samples;
-
-    const hasContent = (avgR > 30 || avgG > 30 || avgB > 30) && 
-                      (avgR < 240 || avgG < 240 || avgB < 240);
-
-    if (hasContent) {
-      let left = width, right = 0, top = height, bottom = 0;
-
-      for (let y = 0; y < height; y += 2) {
-        for (let x = 0; x < width; x += 2) {
-          const i = (y * width + x) * 4;
-          const r = imageData.data[i];
-          const g = imageData.data[i + 1];
-          const b = imageData.data[i + 2];
-
-          if (Math.abs(r - avgR) > 20 || Math.abs(g - avgG) > 20 || Math.abs(b - avgB) > 20) {
-            left = Math.min(left, x);
-            right = Math.max(right, x);
-            top = Math.min(top, y);
-            bottom = Math.max(bottom, y);
-          }
-        }
-      }
-
-      const centerX = (left + right) / 2;
-      const centerY = (top + bottom) / 2;
-      const objWidth = right - left;
-      const objHeight = bottom - top;
-
-      const posX = (centerX / width) * 100;
-      const posY = (centerY / height) * 100;
-
-      trackedPositionRef.current.x = trackedPositionRef.current.x * 0.8 + posX * 0.2;
-      trackedPositionRef.current.y = trackedPositionRef.current.y * 0.8 + posY * 0.2;
-
-      return {
-        position: { x: trackedPositionRef.current.x, y: trackedPositionRef.current.y },
-        size: { width: objWidth, height: objHeight },
-        detected: true
-      };
-    }
-
-    return { detected: false };
-  }, []);
-
+  // Start video playback
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
@@ -150,31 +224,30 @@ const App = () => {
       overlayVideoRef.current.muted = false;
       await overlayVideoRef.current.play();
       setIsVideoPlaying(true);
-      setDebugInfo('Video playing with sound');
+      setDebugInfo('Video playing');
     } catch (error) {
       console.error('Video playback error:', error);
-      setDebugInfo('Click anywhere to play video with sound');
+      setDebugInfo('Tap to play video');
       
       const playOnClick = () => {
-        if (overlayVideoRef.current) {
-          overlayVideoRef.current.play()
-            .then(() => {
-              setIsVideoPlaying(true);
-              setDebugInfo('Video playing with sound');
-              document.removeEventListener('click', playOnClick);
-            })
-            .catch(console.error);
-        }
+        overlayVideoRef.current?.play()
+          .then(() => {
+            setIsVideoPlaying(true);
+            setDebugInfo('Video playing');
+            document.removeEventListener('click', playOnClick);
+          })
+          .catch(console.error);
       };
       document.addEventListener('click', playOnClick);
     }
   }, [videoUrl, isVideoPlaying]);
 
+  // Process video frame
   const processFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
-    if (!video || !canvas) {
+    if (!video || !canvas || !markerFeaturesRef.current) {
       animationFrameRef.current = requestAnimationFrame(processFrame);
       return;
     }
@@ -191,36 +264,57 @@ const App = () => {
     
     context.drawImage(video, 0, 0);
     
-    const centerWidth = canvas.width * 0.5;
-    const centerHeight = canvas.height * 0.5;
+    // Process center region for efficiency
+    const centerWidth = canvas.width * 0.6;
+    const centerHeight = canvas.height * 0.6;
     const x = (canvas.width - centerWidth) / 2;
     const y = (canvas.height - centerHeight) / 2;
     
-    const imageData = context.getImageData(x, y, centerWidth, centerHeight);
-    const result = detectCanvas(imageData);
+    const frameImageData = context.getImageData(x, y, centerWidth, centerHeight);
+    const frameFeatures = extractFeatures(frameImageData);
     
-    if (result.detected) {
-      setCanvasPosition(result.position);
-      setCanvasSize(result.size);
+    // Match features
+    const matches = matchFeatures(markerFeaturesRef.current, frameFeatures);
+    const transform = calculateTransform(matches);
+    
+    if (transform && transform.confidence >= 10) {
+      const markerAspectRatio = markerImageRef.current.height / markerImageRef.current.width;
+      const targetWidth = Math.min(transform.scale * 100, 40);
+      const targetHeight = targetWidth * markerAspectRatio;
+
+      // Smooth position updates using lastPositionRef
+      const newX = (transform.x / centerWidth) * 100;
+      const newY = (transform.y / centerHeight) * 100;
       
-      if (!isCanvasDetected) {
-        setIsCanvasDetected(true);
+      lastPositionRef.current = {
+        x: lastPositionRef.current.x * 0.8 + newX * 0.2,
+        y: lastPositionRef.current.y * 0.8 + newY * 0.2
+      };
+      
+      setCanvasPosition(lastPositionRef.current);
+      setCanvasSize({
+        width: targetWidth,
+        height: targetHeight
+      });
+      
+      if (!isMarkerDetected) {
+        setIsMarkerDetected(true);
         startVideo();
       }
-    } else if (isCanvasDetected) {
-      setIsCanvasDetected(false);
+    } else if (isMarkerDetected) {
+      setIsMarkerDetected(false);
     }
 
     animationFrameRef.current = requestAnimationFrame(processFrame);
-  }, [detectCanvas, startVideo, isCanvasDetected]);
+  }, [extractFeatures, matchFeatures, calculateTransform, startVideo, isMarkerDetected]);
 
+  // Initialize camera
   useEffect(() => {
-    let isComponentMounted = true;
-    let currentStream = null;
+    let stream = null;
 
     const startCamera = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
             width: { ideal: 1280 },
@@ -229,51 +323,42 @@ const App = () => {
           }
         });
 
-        if (!isComponentMounted) return;
-
-        const videoTrack = stream.getVideoTracks()[0];
-        await videoTrack.applyConstraints({
-          advanced: [
-            { exposureMode: "continuous" },
-            { focusMode: "continuous" },
-            { whiteBalanceMode: "continuous" }
-          ]
-        }).catch(() => {});
-
-        currentStream = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-          console.log('Camera started');
+          const track = stream.getVideoTracks()[0];
           
-          if (isComponentMounted) {
-            setDebugInfo('Camera ready - Show image');
-            animationFrameRef.current = requestAnimationFrame(processFrame);
-          }
+          // Optimize camera settings
+          await track.applyConstraints({
+            advanced: [
+              { exposureMode: "continuous" },
+              { focusMode: "continuous" },
+              { whiteBalanceMode: "continuous" }
+            ]
+          }).catch(() => {});
+
+          await videoRef.current.play();
+          setDebugInfo('Camera ready - Show marker image');
+          processFrame();
         }
       } catch (error) {
         console.error('Camera error:', error);
-        if (isComponentMounted) {
-          setDebugInfo(`Camera error: ${error.message}`);
-        }
+        setDebugInfo(`Camera error: ${error.message}`);
       }
     };
 
-    if (videoUrl) {
-      console.log('Starting camera');
+    if (markerUrl) {
       startCamera();
     }
 
     return () => {
-      isComponentMounted = false;
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
-      if (currentStream) {
-        currentStream.getTracks().forEach(track => track.stop());
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
       }
     };
-  }, [processFrame, videoUrl]);
+  }, [markerUrl, processFrame]);
 
   const styles = {
     container: {
@@ -300,11 +385,12 @@ const App = () => {
       top: `${canvasPosition.y}%`,
       left: `${canvasPosition.x}%`,
       transform: 'translate(-50%, -50%)',
-      width: `${Math.min(canvasSize.width * 1.2, 40)}vw`,
-      height: `${Math.min(canvasSize.height * 1.2, 40)}vh`,
+      width: `${canvasSize.width}vw`,
+      height: `${canvasSize.height}vh`,
       objectFit: 'contain',
       zIndex: 20,
-      transition: 'all 0.1s ease-out'
+      transition: 'all 0.1s ease-out',
+      display: isMarkerDetected ? 'block' : 'none'
     },
     debugInfo: {
       position: 'absolute',
@@ -347,10 +433,16 @@ const App = () => {
 
       <div style={styles.debugInfo}>
         <div>Status: {debugInfo}</div>
-        <div>Key: {contentKey || 'Not found'}</div>
+        <div>Content Key: {contentKey || 'Not found'}</div>
         <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
-        <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
+        <div>Marker Detected: {isMarkerDetected ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
+        {isMarkerDetected && (
+          <>
+            <div>Position: {Math.round(canvasPosition.x)}%, {Math.round(canvasPosition.y)}%</div>
+            <div>Size: {Math.round(canvasSize.width)}vw x {Math.round(canvasSize.height)}vh</div>
+          </>
+        )}
       </div>
     </div>
   );
