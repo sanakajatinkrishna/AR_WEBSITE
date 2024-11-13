@@ -1,4 +1,3 @@
-// App.js
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
@@ -25,7 +24,9 @@ class ImageMatcher {
     this.targetCtx = this.targetCanvas.getContext('2d', { willReadFrequently: true });
     this.searchCanvas = document.createElement('canvas');
     this.searchCtx = this.searchCanvas.getContext('2d', { willReadFrequently: true });
-    this.matchThreshold = 0.35;
+    this.matchThreshold = 0.6;
+    this.lastMatchTime = 0;
+    this.processEveryNthPixel = 4;
   }
 
   async initialize(imageUrl) {
@@ -35,27 +36,24 @@ class ImageMatcher {
 
       return new Promise((resolve, reject) => {
         img.onload = () => {
-          // Resize image to a manageable size
-          const maxSize = 200;
-          let width = img.width;
-          let height = img.height;
+          const targetSize = 256;
+          const aspectRatio = img.width / img.height;
+          let width = targetSize;
+          let height = targetSize / aspectRatio;
 
-          if (width > height) {
-            if (width > maxSize) {
-              height = (height * maxSize) / width;
-              width = maxSize;
-            }
-          } else {
-            if (height > maxSize) {
-              width = (width * maxSize) / height;
-              height = maxSize;
-            }
+          if (height > targetSize) {
+            height = targetSize;
+            width = targetSize * aspectRatio;
           }
 
           this.targetCanvas.width = width;
           this.targetCanvas.height = height;
           this.targetCtx.drawImage(img, 0, 0, width, height);
-          this.targetImage = this.targetCtx.getImageData(0, 0, width, height);
+          
+          this.targetImage = this.processImageData(
+            this.targetCtx.getImageData(0, 0, width, height)
+          );
+          
           console.log('Target image initialized:', width, 'x', height);
           resolve(true);
         };
@@ -73,10 +71,48 @@ class ImageMatcher {
     }
   }
 
+  processImageData(imageData) {
+    const { data, width, height } = imageData;
+    const features = new Float32Array((width * height) / this.processEveryNthPixel);
+    let featureIndex = 0;
+
+    let totalBrightness = 0;
+    let pixelCount = 0;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const brightness = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
+      totalBrightness += brightness;
+      pixelCount++;
+    }
+
+    const averageBrightness = totalBrightness / pixelCount;
+
+    for (let i = 0; i < data.length; i += 4 * this.processEveryNthPixel) {
+      const brightness = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
+      features[featureIndex++] = brightness - averageBrightness;
+    }
+
+    return {
+      features,
+      width,
+      height,
+      averageBrightness
+    };
+  }
+
   matchFrame(frame) {
     if (!this.targetImage) return { matched: false };
 
-    const scales = [0.5, 0.75, 1, 1.25, 1.5];
+    const now = Date.now();
+    if (now - this.lastMatchTime < 50) {
+      return { matched: false };
+    }
+    this.lastMatchTime = now;
+
+    this.searchCanvas.width = this.targetImage.width;
+    this.searchCanvas.height = this.targetImage.height;
+
+    const scales = [0.7, 0.85, 1, 1.15, 1.3];
     let bestMatch = { score: 0, x: 0, y: 0, scale: 1 };
 
     for (const scale of scales) {
@@ -85,16 +121,21 @@ class ImageMatcher {
 
       if (searchWidth > frame.width || searchHeight > frame.height) continue;
 
-      // Prepare search canvas
-      this.searchCanvas.width = frame.width;
-      this.searchCanvas.height = frame.height;
-      this.searchCtx.putImageData(frame, 0, 0);
-
-      const stepSize = Math.max(10, Math.floor(searchWidth * 0.1)); // 10% of width, minimum 10px
+      const stepSize = Math.max(16, Math.floor(searchWidth * 0.1));
 
       for (let y = 0; y <= frame.height - searchHeight; y += stepSize) {
         for (let x = 0; x <= frame.width - searchWidth; x += stepSize) {
-          const score = this.compareRegions(x, y, searchWidth, searchHeight);
+          this.searchCtx.drawImage(
+            this.searchCanvas,
+            x, y, searchWidth, searchHeight,
+            0, 0, this.targetImage.width, this.targetImage.height
+          );
+
+          const searchRegion = this.processImageData(
+            this.searchCtx.getImageData(0, 0, this.targetImage.width, this.targetImage.height)
+          );
+
+          const score = this.compareFeatures(this.targetImage, searchRegion);
           
           if (score > bestMatch.score) {
             bestMatch = { score, x, y, width: searchWidth, height: searchHeight, scale };
@@ -121,54 +162,23 @@ class ImageMatcher {
     return { matched: false };
   }
 
-  compareRegions(x, y, width, height) {
-    // Create temporary canvas for comparison
-    const tempCanvas = document.createElement('canvas');
-    const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
-    tempCanvas.width = this.targetImage.width;
-    tempCanvas.height = this.targetImage.height;
+  compareFeatures(img1, img2) {
+    const features1 = img1.features;
+    const features2 = img2.features;
+    
+    let dotProduct = 0;
+    let norm1 = 0;
+    let norm2 = 0;
 
-    // Extract and scale region
-    tempCtx.drawImage(
-      this.searchCanvas,
-      x, y, width, height,
-      0, 0, this.targetImage.width, this.targetImage.height
-    );
-
-    const regionData = tempCtx.getImageData(0, 0, this.targetImage.width, this.targetImage.height);
-    return this.calculateSimilarity(this.targetImage, regionData);
-  }
-
-  calculateSimilarity(img1, img2) {
-    const data1 = img1.data;
-    const data2 = img2.data;
-    let matchCount = 0;
-    let totalPixels = 0;
-
-    // Compare every 4th pixel (RGBA values)
-    for (let i = 0; i < data1.length; i += 16) {
-      const r1 = data1[i];
-      const g1 = data1[i + 1];
-      const b1 = data1[i + 2];
-      
-      const r2 = data2[i];
-      const g2 = data2[i + 1];
-      const b2 = data2[i + 2];
-
-      // Calculate color difference
-      const colorDiff = Math.sqrt(
-        Math.pow(r1 - r2, 2) +
-        Math.pow(g1 - g2, 2) +
-        Math.pow(b1 - b2, 2)
-      );
-
-      if (colorDiff < 100) { // Threshold for color similarity
-        matchCount++;
-      }
-      totalPixels++;
+    for (let i = 0; i < features1.length; i++) {
+      dotProduct += features1[i] * features2[i];
+      norm1 += features1[i] * features1[i];
+      norm2 += features2[i] * features2[i];
     }
 
-    return matchCount / totalPixels;
+    if (norm1 === 0 || norm2 === 0) return 0;
+
+    return dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2));
   }
 }
 
@@ -232,7 +242,6 @@ const App = () => {
     
     return () => {
       if (matcher.current) {
-        // Cleanup
         matcher.current = null;
       }
     };
@@ -428,7 +437,7 @@ const App = () => {
       <div style={styles.debugInfo}>
         <div>Status: {debugInfo}</div>
         <div>Match Confidence: {(matchConfidence * 100).toFixed(1)}%</div>
-        <div>Marker Detected: {isMarkerDetected ? 'Yes' : 'No'}</div>
+<div>Marker Detected: {isMarkerDetected ? 'Yes' : 'No'}</div>
       </div>
 
       <div style={styles.markerIndicator}>
