@@ -3,7 +3,6 @@ import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
 import { getStorage, ref, getDownloadURL } from 'firebase/storage';
 
-// Firebase Configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -14,7 +13,6 @@ const firebaseConfig = {
   measurementId: "G-N5Q9K9G3JN"
 };
 
-// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const storage = getStorage(app);
@@ -35,18 +33,29 @@ const App = () => {
   const [referenceImageUrl, setReferenceImageUrl] = useState(null);
   const [matchPosition, setMatchPosition] = useState({ x: 50, y: 50, scale: 1 });
   const [isMatched, setIsMatched] = useState(false);
+  const [loadingError, setLoadingError] = useState(null);
 
   const startVideo = useCallback(async () => {
-    if (!overlayVideoRef.current || !videoUrl) return;
+    if (!overlayVideoRef.current || !videoUrl) {
+      console.log('Video prerequisites not met:', { hasVideoRef: !!overlayVideoRef.current, videoUrl });
+      return;
+    }
 
     try {
+      console.log('Starting video playback...');
       overlayVideoRef.current.src = videoUrl;
       overlayVideoRef.current.muted = false;
-      await overlayVideoRef.current.play();
-      setIsVideoPlaying(true);
-      setDebugInfo('Video playing');
+      
+      const playPromise = overlayVideoRef.current.play();
+      if (playPromise !== undefined) {
+        await playPromise;
+        setIsVideoPlaying(true);
+        setDebugInfo('Video playing');
+        console.log('Video playback started successfully');
+      }
     } catch (error) {
-      console.log('Video playback error - Click to play');
+      console.error('Video playback error:', error);
+      setDebugInfo('Click to play video');
       
       const playOnClick = async () => {
         try {
@@ -56,13 +65,13 @@ const App = () => {
             setDebugInfo('Video playing');
             document.removeEventListener('click', playOnClick);
           }
-        } catch (err) {
+        } catch (clickError) {
+          console.error('Click-to-play error:', clickError);
           setDebugInfo('Video playback failed');
         }
       };
       
       document.addEventListener('click', playOnClick);
-      setDebugInfo('Click to play video');
     }
   }, [videoUrl]);
 
@@ -80,6 +89,7 @@ const App = () => {
     let matchScore = 0;
     let totalPixels = currentImageData.data.length / 4;
     
+    // Sample pixels for comparison
     for (let i = 0; i < currentImageData.data.length; i += 16) {
       const currentR = currentImageData.data[i];
       const currentG = currentImageData.data[i + 1];
@@ -168,6 +178,7 @@ const App = () => {
 
       try {
         setDebugInfo('Loading content...');
+        console.log('Loading content for key:', contentKey);
 
         const arContentRef = collection(db, 'arContent');
         const q = query(
@@ -177,6 +188,7 @@ const App = () => {
         );
 
         const snapshot = await getDocs(q);
+        console.log('Firestore query result:', snapshot.size);
         
         if (snapshot.empty) {
           setDebugInfo('Content not found');
@@ -185,41 +197,53 @@ const App = () => {
 
         const doc = snapshot.docs[0];
         const data = doc.data();
+        console.log('Content data found:', { hasVideo: !!data.videoUrl, hasImage: !!data.imageUrl });
 
-        // Handle video URL
-        if (data.videoUrl.startsWith('videos/')) {
-          const videoRef = ref(storage, data.videoUrl);
-          const videoDownloadUrl = await getDownloadURL(videoRef);
-          setVideoUrl(videoDownloadUrl);
-        } else {
-          setVideoUrl(data.videoUrl);
+        if (!data.videoUrl || !data.imageUrl) {
+          throw new Error('Missing video or image URL in content');
         }
 
-        // Handle image URL
-        let finalImageUrl;
-        if (data.imageUrl.startsWith('images/')) {
-          const imageRef = ref(storage, data.imageUrl);
+        // Get video URL
+        let finalVideoUrl = data.videoUrl;
+        if (finalVideoUrl.startsWith('videos/')) {
+          const videoRef = ref(storage, finalVideoUrl);
+          finalVideoUrl = await getDownloadURL(videoRef);
+        }
+        setVideoUrl(finalVideoUrl);
+        console.log('Video URL set');
+
+        // Get image URL
+        let finalImageUrl = data.imageUrl;
+        if (finalImageUrl.startsWith('images/')) {
+          const imageRef = ref(storage, finalImageUrl);
           finalImageUrl = await getDownloadURL(imageRef);
-        } else {
-          finalImageUrl = data.imageUrl;
         }
-
         setReferenceImageUrl(finalImageUrl);
-        setDebugInfo('Loading reference image...');
+        console.log('Image URL set');
 
+        // Load reference image
         const img = new Image();
         img.crossOrigin = "anonymous";
+        
         img.onload = () => {
+          console.log('Reference image loaded');
           referenceImageRef.current = img;
           setDebugInfo('Ready - Show image to camera');
+          setLoadingError(null);
         };
-        img.onerror = () => {
+        
+        img.onerror = (error) => {
+          console.error('Image load error:', error);
           setDebugInfo('Failed to load reference image');
+          setLoadingError('Failed to load image - please try again');
         };
+        
         img.src = finalImageUrl;
 
       } catch (error) {
+        console.error('Content loading error:', error);
         setDebugInfo(`Error: ${error.message}`);
+        setLoadingError(error.message);
       }
     };
 
@@ -244,6 +268,7 @@ const App = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
+          console.log('Camera started');
           animationFrameRef.current = requestAnimationFrame(processFrame);
         }
 
@@ -251,6 +276,7 @@ const App = () => {
           stream.getTracks().forEach(track => track.stop());
         };
       } catch (error) {
+        console.error('Camera error:', error);
         setDebugInfo(`Camera error: ${error.message}`);
       }
     };
@@ -305,6 +331,8 @@ const App = () => {
       color: 'white',
       padding: '10px',
       borderRadius: '5px',
+      fontSize: '14px',
+      lineHeight: '1.5',
       zIndex: 30
     }
   };
@@ -339,6 +367,8 @@ const App = () => {
       <div style={styles.debugInfo}>
         <div>Status: {debugInfo}</div>
         <div>Content Key: {contentKey || 'Not found'}</div>
+        <div>Reference Image: {referenceImageUrl ? 'Loaded' : 'Not loaded'}</div>
+        {loadingError && <div style={{color: '#ff6b6b'}}>Error: {loadingError}</div>}
         <div>Match Found: {isMatched ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
       </div>
