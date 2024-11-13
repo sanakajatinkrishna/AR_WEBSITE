@@ -1,4 +1,3 @@
-// App.js
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
@@ -19,7 +18,6 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const App = () => {
-  // Get content key directly from URL
   const contentKey = new URLSearchParams(window.location.search).get('key');
 
   const videoRef = useRef(null);
@@ -31,52 +29,10 @@ const App = () => {
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
+  const [imageUrl, setImageUrl] = useState(null);
   const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [isCanvasDetected, setIsCanvasDetected] = useState(false);
-
-  // Load content based on key
-  useEffect(() => {
-    const loadContent = async () => {
-      if (!contentKey) {
-        setDebugInfo('No content key found');
-        return;
-      }
-
-      try {
-        console.log('Loading content for key:', contentKey);
-        setDebugInfo('Verifying content...');
-
-        const arContentRef = collection(db, 'arContent');
-        const q = query(
-          arContentRef,
-          where('contentKey', '==', contentKey),
-          where('isActive', '==', true)
-        );
-
-        const snapshot = await getDocs(q);
-        
-        if (snapshot.empty) {
-          console.log('No content found');
-          setDebugInfo('Invalid or inactive content');
-          return;
-        }
-
-        const doc = snapshot.docs[0];
-        const data = doc.data();
-        console.log('Content found:', data);
-
-        setVideoUrl(data.videoUrl);
-        setDebugInfo('Content loaded - Please show image');
-
-      } catch (error) {
-        console.error('Content loading error:', error);
-        setDebugInfo(`Error: ${error.message}`);
-      }
-    };
-
-    loadContent();
-  }, [contentKey]);
 
   const detectCanvas = useCallback((imageData) => {
     const width = imageData.width;
@@ -215,6 +171,49 @@ const App = () => {
   }, [detectCanvas, startVideo, isCanvasDetected]);
 
   useEffect(() => {
+    const loadContent = async () => {
+      if (!contentKey) {
+        setDebugInfo('No content key found');
+        return;
+      }
+
+      try {
+        console.log('Loading content for key:', contentKey);
+        setDebugInfo('Verifying content...');
+
+        const arContentRef = collection(db, 'arContent');
+        const q = query(
+          arContentRef,
+          where('contentKey', '==', contentKey),
+          where('isActive', '==', true)
+        );
+
+        const snapshot = await getDocs(q);
+        
+        if (snapshot.empty) {
+          console.log('No content found');
+          setDebugInfo('Invalid or inactive content');
+          return;
+        }
+
+        const doc = snapshot.docs[0];
+        const data = doc.data();
+        console.log('Content found:', data);
+
+        setVideoUrl(data.videoUrl);
+        setImageUrl(data.imageUrl);
+        setDebugInfo('Content loaded - Please show image');
+
+      } catch (error) {
+        console.error('Content loading error:', error);
+        setDebugInfo(`Error: ${error.message}`);
+      }
+    };
+
+    loadContent();
+  }, [contentKey]);
+
+  useEffect(() => {
     let isComponentMounted = true;
     let currentStream = null;
 
@@ -315,6 +314,21 @@ const App = () => {
       padding: '10px',
       borderRadius: '5px',
       zIndex: 30
+    },
+    referenceImage: {
+      position: 'absolute',
+      bottom: 20,
+      right: 20,
+      width: '150px',
+      height: '150px',
+      objectFit: 'contain',
+      borderRadius: '5px',
+      opacity: 0.7,
+      zIndex: 30,
+      backgroundColor: 'rgba(0,0,0,0.3)',
+      padding: '5px',
+      boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+      border: '1px solid rgba(255,255,255,0.2)'
     }
   };
 
@@ -352,6 +366,14 @@ const App = () => {
         <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
       </div>
+
+       {imageUrl && (
+        <img 
+          src={imageUrl}
+          alt="AR marker to scan"
+          style={styles.referenceImage}
+        />
+      )}
     </div>
   );
 };
