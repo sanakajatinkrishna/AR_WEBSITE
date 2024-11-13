@@ -1,7 +1,8 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getStorage, ref, getDownloadURL } from 'firebase/storage';
-import { getFirestore, collection, getDocs } from 'firebase/firestore';
+import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
+import { useLocation } from 'react-router-dom';
 
 // Firebase Configuration
 const firebaseConfig = {
@@ -20,6 +21,10 @@ const db = getFirestore(app);
 const storage = getStorage(app);
 
 const ARViewer = () => {
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  const contentKey = params.get('key');
+
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
@@ -41,7 +46,6 @@ const ARViewer = () => {
     let totalR = 0, totalG = 0, totalB = 0;
     let samples = 0;
 
-    // Sample pixels for average color
     for (let y = 0; y < height; y += 4) {
       for (let x = 0; x < width; x += 4) {
         const i = (y * width + x) * 4;
@@ -56,12 +60,10 @@ const ARViewer = () => {
     const avgG = totalG / samples;
     const avgB = totalB / samples;
 
-    // Check if significant content is present
     const hasContent = (avgR > 30 || avgG > 30 || avgB > 30) && 
                       (avgR < 240 || avgG < 240 || avgB < 240);
 
     if (hasContent) {
-      // Find content boundaries
       let left = width, right = 0, top = height, bottom = 0;
 
       for (let y = 0; y < height; y += 2) {
@@ -85,11 +87,9 @@ const ARViewer = () => {
       const objWidth = right - left;
       const objHeight = bottom - top;
 
-      // Convert to percentages
       const posX = (centerX / width) * 100;
       const posY = (centerY / height) * 100;
 
-      // Apply smoothing
       trackedPositionRef.current.x = trackedPositionRef.current.x * 0.8 + posX * 0.2;
       trackedPositionRef.current.y = trackedPositionRef.current.y * 0.8 + posY * 0.2;
 
@@ -103,7 +103,6 @@ const ARViewer = () => {
     return { detected: false };
   }, []);
 
-  // Handle video playback
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
@@ -132,7 +131,6 @@ const ARViewer = () => {
     }
   }, [videoUrl, isVideoPlaying]);
 
-  // Process frames
   const processFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -154,7 +152,6 @@ const ARViewer = () => {
     
     context.drawImage(video, 0, 0);
     
-    // Get center region
     const centerWidth = canvas.width * 0.5;
     const centerHeight = canvas.height * 0.5;
     const x = (canvas.width - centerWidth) / 2;
@@ -178,20 +175,32 @@ const ARViewer = () => {
     animationFrameRef.current = requestAnimationFrame(processFrame);
   }, [detectCanvas, startVideo, isCanvasDetected]);
 
-  // Load video from Firebase
+  // Load specific video based on content key
   useEffect(() => {
-    const loadFirstVideo = async () => {
+    const loadContentVideo = async () => {
+      if (!contentKey) {
+        setDebugInfo('No content key provided');
+        return;
+      }
+
       try {
+        setDebugInfo('Verifying content key...');
         const arContentRef = collection(db, 'arContent');
-        const snapshot = await getDocs(arContentRef);
+        const q = query(
+          arContentRef,
+          where('contentKey', '==', contentKey),
+          where('isActive', '==', true)
+        );
+        
+        const snapshot = await getDocs(q);
         
         if (snapshot.empty) {
-          setDebugInfo('No content found in Firestore');
+          setDebugInfo('Invalid or inactive content key');
           return;
         }
 
-        const firstDoc = snapshot.docs[0];
-        const data = firstDoc.data();
+        const doc = snapshot.docs[0];
+        const data = doc.data();
 
         if (data.videoPath) {
           const videoRef = ref(storage, data.videoPath);
@@ -201,79 +210,79 @@ const ARViewer = () => {
           setVideoUrl(data.videoUrl);
         }
         
-        setDebugInfo('Ready - Detecting canvas');
+        setDebugInfo('Content verified - Show canvas');
       } catch (error) {
         console.error('Error loading video:', error);
         setDebugInfo(`Loading error: ${error.message}`);
       }
     };
 
-    loadFirstVideo();
-  }, []);
+    loadContentVideo();
+  }, [contentKey]);
 
-  // Initialize camera
-// Initialize camera
-useEffect(() => {
-  let isComponentMounted = true;
-  let currentStream = null;
-  let videoElement = null; // Add variable for video element
+  useEffect(() => {
+    let isComponentMounted = true;
+    let currentStream = null;
+    let videoElement = null;
 
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30 }
+    const startCamera = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
+          }
+        });
+
+        if (!isComponentMounted) return;
+
+        const videoTrack = stream.getVideoTracks()[0];
+        await videoTrack.applyConstraints({
+          advanced: [
+            { exposureMode: "continuous" },
+            { focusMode: "continuous" },
+            { whiteBalanceMode: "continuous" }
+          ]
+        }).catch(() => {});
+
+        currentStream = stream;
+        if (videoRef.current) {
+          videoElement = videoRef.current;
+          videoElement.srcObject = stream;
+          await videoElement.play();
+          
+          if (isComponentMounted) {
+            setDebugInfo('Camera ready - Show canvas');
+            animationFrameRef.current = requestAnimationFrame(processFrame);
+          }
         }
-      });
-
-      if (!isComponentMounted) return;
-
-      const videoTrack = stream.getVideoTracks()[0];
-      await videoTrack.applyConstraints({
-        advanced: [
-          { exposureMode: "continuous" },
-          { focusMode: "continuous" },
-          { whiteBalanceMode: "continuous" }
-        ]
-      }).catch(() => {});
-
-      currentStream = stream;
-      if (videoRef.current) {
-        videoElement = videoRef.current; // Store reference to video element
-        videoElement.srcObject = stream;
-        await videoElement.play();
-        
+      } catch (error) {
+        console.error('Camera error:', error);
         if (isComponentMounted) {
-          setDebugInfo('Camera ready - Show canvas');
-          animationFrameRef.current = requestAnimationFrame(processFrame);
+          setDebugInfo(`Camera error: ${error.message}`);
         }
       }
-    } catch (error) {
-      console.error('Camera error:', error);
-      if (isComponentMounted) {
-        setDebugInfo(`Camera error: ${error.message}`);
+    };
+
+    if (videoUrl) {
+      startCamera();
+    }
+
+    return () => {
+      isComponentMounted = false;
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
       }
-    }
-  };
-
-  startCamera();
-
-  return () => {
-    isComponentMounted = false;
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
-    }
-    if (currentStream) {
-      currentStream.getTracks().forEach(track => track.stop());
-    }
-    if (videoElement) { // Use stored video element reference
-      videoElement.srcObject = null;
-    }
-  };
-}, [processFrame]);
+      if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
+      }
+      if (videoElement) {
+        videoElement.srcObject = null;
+      }
+    };
+  }, [processFrame, videoUrl]);
 
   const styles = {
     container: {
@@ -320,37 +329,45 @@ useEffect(() => {
 
   return (
     <div style={styles.container}>
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
-        style={styles.video}
-      />
+      {!contentKey ? (
+        <div style={styles.debugInfo}>
+          <div>Error: Invalid QR code or missing content key</div>
+        </div>
+      ) : (
+        <>
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            style={styles.video}
+          />
 
-      <canvas
-        ref={canvasRef}
-        style={styles.canvas}
-      />
+          <canvas
+            ref={canvasRef}
+            style={styles.canvas}
+          />
 
-      {videoUrl && (
-        <video
-          ref={overlayVideoRef}
-          style={styles.overlayVideo}
-          autoPlay
-          playsInline
-          loop
-          muted={false}
-          controls={false}
-        />
+          {videoUrl && (
+            <video
+              ref={overlayVideoRef}
+              style={styles.overlayVideo}
+              autoPlay
+              playsInline
+              loop
+              muted={false}
+              controls={false}
+            />
+          )}
+
+          <div style={styles.debugInfo}>
+            <div>Status: {debugInfo}</div>
+            <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
+            <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
+            <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
+          </div>
+        </>
       )}
-
-      <div style={styles.debugInfo}>
-        <div>Status: {debugInfo}</div>
-        <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
-        <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
-        <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
-      </div>
     </div>
   );
 };
