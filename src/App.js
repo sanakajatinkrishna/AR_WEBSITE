@@ -24,9 +24,9 @@ class ImageMatcher {
     this.targetCtx = this.targetCanvas.getContext('2d', { willReadFrequently: true });
     this.searchCanvas = document.createElement('canvas');
     this.searchCtx = this.searchCanvas.getContext('2d', { willReadFrequently: true });
-    this.matchThreshold = 0.5; // Lowered threshold for testing
+    this.matchThreshold = 0.45;
     this.lastMatchTime = 0;
-    this.processEveryNthPixel = 2; // Process more pixels for accuracy
+    this.processEveryNthPixel = 2;
   }
 
   async initialize(imageUrl) {
@@ -37,31 +37,28 @@ class ImageMatcher {
 
       return new Promise((resolve, reject) => {
         img.onload = () => {
-          // Use original image size for better matching
-          const maxSize = 400; // Increased max size
+          const maxSize = 300;
           let width = img.width;
           let height = img.height;
 
-          if (width > maxSize) {
-            height = (height * maxSize) / width;
-            width = maxSize;
-          }
-          if (height > maxSize) {
-            width = (width * maxSize) / height;
-            height = maxSize;
+          if (width > height) {
+            if (width > maxSize) {
+              height = (height * maxSize) / width;
+              width = maxSize;
+            }
+          } else {
+            if (height > maxSize) {
+              width = (width * maxSize) / height;
+              height = maxSize;
+            }
           }
 
           this.targetCanvas.width = width;
           this.targetCanvas.height = height;
           this.targetCtx.drawImage(img, 0, 0, width, height);
           
-          // Store the processed image data
           const imageData = this.targetCtx.getImageData(0, 0, width, height);
-          this.targetImage = {
-            data: imageData.data,
-            width: width,
-            height: height
-          };
+          this.targetImage = this.processImageData(imageData);
           
           console.log('Target image processed:', width, 'x', height);
           resolve(true);
@@ -80,75 +77,76 @@ class ImageMatcher {
     }
   }
 
-  matchFrame(frame) {
-    if (!this.targetImage) {
-      console.log('No target image loaded');
-      return { matched: false };
+  processImageData(imageData) {
+    const { data, width, height } = imageData;
+    const features = new Float32Array((width * height) / this.processEveryNthPixel);
+    let featureIndex = 0;
+
+    let totalBrightness = 0;
+    let pixelCount = 0;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const brightness = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
+      totalBrightness += brightness;
+      pixelCount++;
     }
 
-    // Throttle processing
-    const now = Date.now();
-    if (now - this.lastMatchTime < 100) { // Increased interval for better performance
-      return { matched: false };
+    const averageBrightness = totalBrightness / pixelCount;
+
+    for (let i = 0; i < data.length; i += 4 * this.processEveryNthPixel) {
+      const brightness = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
+      features[featureIndex++] = brightness - averageBrightness;
     }
+
+    return {
+      features,
+      width,
+      height,
+      averageBrightness
+    };
+  }
+
+  matchFrame(frame) {
+    if (!this.targetImage || !frame) return { matched: false };
+
+    const now = Date.now();
+    if (now - this.lastMatchTime < 50) return { matched: false };
     this.lastMatchTime = now;
 
-    // Get frame dimensions
-    const { width: frameWidth, height: frameHeight, data: frameData } = frame;
-
-    // Scales to try
-    const scales = [0.5, 0.75, 1, 1.25, 1.5];
+    // Process frame data
+    const frameData = this.processImageData(frame);
+    const scales = [0.7, 0.85, 1, 1.15, 1.3];
     let bestMatch = { score: 0, x: 0, y: 0, scale: 1 };
 
-    // Process frame at different scales
     for (const scale of scales) {
       const searchWidth = Math.floor(this.targetImage.width * scale);
       const searchHeight = Math.floor(this.targetImage.height * scale);
 
-      if (searchWidth > frameWidth || searchHeight > frameHeight) continue;
+      if (searchWidth > frame.width || searchHeight > frame.height) continue;
 
-      // Search with larger steps for performance
       const stepSize = Math.max(20, Math.floor(searchWidth * 0.2));
 
-      for (let y = 0; y <= frameHeight - searchHeight; y += stepSize) {
-        for (let x = 0; x <= frameWidth - searchWidth; x += stepSize) {
-          // Draw the region to compare
-          this.searchCtx.clearRect(0, 0, this.searchCanvas.width, this.searchCanvas.height);
-          this.searchCanvas.width = searchWidth;
-          this.searchCanvas.height = searchHeight;
-          
-          // Extract region from frame
-          const frameImageData = new ImageData(
-            new Uint8ClampedArray(frameData.buffer),
-            frameWidth,
-            frameHeight
-          );
-          
-          this.searchCtx.putImageData(frameImageData, -x, -y);
-          const regionImageData = this.searchCtx.getImageData(0, 0, searchWidth, searchHeight);
-          
-          // Compare the regions
-          const score = this.compareRegions(regionImageData, scale);
+      for (let y = 0; y <= frame.height - searchHeight; y += stepSize) {
+        for (let x = 0; x <= frame.width - searchWidth; x += stepSize) {
+          const score = this.compareRegions(frameData, x, y, searchWidth, searchHeight);
           
           if (score > bestMatch.score) {
             bestMatch = { score, x, y, width: searchWidth, height: searchHeight, scale };
-            console.log(`New best match: ${score.toFixed(2)} at (${x}, ${y}) scale ${scale}`);
           }
         }
       }
     }
 
     if (bestMatch.score > this.matchThreshold) {
-      console.log(`Match found! Score: ${bestMatch.score.toFixed(2)}`);
       return {
         matched: true,
         position: {
-          x: (bestMatch.x + bestMatch.width / 2) / frameWidth * 100,
-          y: (bestMatch.y + bestMatch.height / 2) / frameHeight * 100
+          x: (bestMatch.x + bestMatch.width / 2) / frame.width * 100,
+          y: (bestMatch.y + bestMatch.height / 2) / frame.height * 100
         },
         size: {
-          width: (bestMatch.width / frameWidth) * 100,
-          height: (bestMatch.height / frameHeight) * 100
+          width: (bestMatch.width / frame.width) * 100,
+          height: (bestMatch.height / frame.height) * 100
         },
         confidence: bestMatch.score
       };
@@ -157,46 +155,31 @@ class ImageMatcher {
     return { matched: false };
   }
 
-  compareRegions(regionImageData, scale) {
-    // Simple color-based comparison
-    const targetData = this.targetImage.data;
-    const regionData = regionImageData.data;
-    let matches = 0;
-    let total = 0;
+  compareRegions(frameData, x, y, width, height) {
+    let score = 0;
+    let count = 0;
 
-    for (let i = 0; i < regionData.length; i += 4 * this.processEveryNthPixel) {
-      const targetR = targetData[i];
-      const targetG = targetData[i + 1];
-      const targetB = targetData[i + 2];
-
-      const regionR = regionData[i];
-      const regionG = regionData[i + 1];
-      const regionB = regionData[i + 2];
-
-      // Calculate color difference
-      const diff = Math.sqrt(
-        Math.pow(targetR - regionR, 2) +
-        Math.pow(targetG - regionG, 2) +
-        Math.pow(targetB - regionB, 2)
-      );
-
-      if (diff < 50) { // More lenient color matching
-        matches++;
+    for (let i = 0; i < this.targetImage.features.length; i++) {
+      const frameIndex = (y + Math.floor(i / this.targetImage.width)) * frameData.width + 
+                        (x + (i % this.targetImage.width));
+      
+      if (frameIndex < frameData.features.length) {
+        const diff = Math.abs(this.targetImage.features[i] - frameData.features[frameIndex]);
+        score += 1 / (1 + diff);
+        count++;
       }
-      total++;
     }
 
-    return matches / total;
+    return count > 0 ? score / count : 0;
   }
-}
-
-const App = () => {
+}const App = () => {
   const contentKey = new URLSearchParams(window.location.search).get('key');
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const animationFrameRef = useRef(null);
   const matcher = useRef(null);
+  const streamRef = useRef(null);
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
@@ -206,11 +189,74 @@ const App = () => {
   const [canvasSize, setCanvasSize] = useState({ width: 40, height: 40 });
   const [matchConfidence, setMatchConfidence] = useState(0);
   const [isMarkerDetected, setIsMarkerDetected] = useState(false);
+  const [cameraError, setCameraError] = useState(null);
+
+  const processFrame = useCallback(() => {
+    if (!videoRef.current || !canvasRef.current || !matcher.current) {
+      animationFrameRef.current = requestAnimationFrame(processFrame);
+      return;
+    }
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+
+    context.drawImage(video, 0, 0);
+    const frame = context.getImageData(0, 0, canvas.width, canvas.height);
+    
+    const result = matcher.current.matchFrame(frame);
+    if (result.matched) {
+      setIsMarkerDetected(true);
+      setMatchConfidence(result.confidence);
+      setCanvasPosition(result.position);
+      setCanvasSize(result.size);
+
+      if (!isVideoPlaying && overlayVideoRef.current) {
+        overlayVideoRef.current.play()
+          .then(() => setIsVideoPlaying(true))
+          .catch(error => console.error('Video playback error:', error));
+      }
+    } else {
+      setIsMarkerDetected(false);
+      setMatchConfidence(0);
+    }
+
+    animationFrameRef.current = requestAnimationFrame(processFrame);
+  }, [isVideoPlaying]);
+
+  const startCamera = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      });
+
+      if (videoRef.current) {
+        streamRef.current = stream;
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+        setDebugInfo('Camera active - Show marker');
+        animationFrameRef.current = requestAnimationFrame(processFrame);
+      }
+    } catch (error) {
+      console.error('Camera error:', error);
+      setCameraError(error.message);
+      setDebugInfo('Camera error - Please allow camera access');
+    }
+  }, [processFrame]);
 
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
-        setDebugInfo('No content key found');
+        setDebugInfo('No content key provided');
         return;
       }
 
@@ -225,12 +271,11 @@ const App = () => {
 
         const snapshot = await getDocs(q);
         if (snapshot.empty) {
-          setDebugInfo('Invalid or inactive content');
+          setDebugInfo('Content not found or inactive');
           return;
         }
 
         const data = snapshot.docs[0].data();
-        console.log('Content loaded:', data);
         setVideoUrl(data.videoUrl);
         setImageUrl(data.imageUrl);
         
@@ -238,137 +283,33 @@ const App = () => {
         const initialized = await matcher.current.initialize(data.imageUrl);
         
         if (initialized) {
-          setDebugInfo('Matcher initialized - Show marker image');
-        } else {
-          setDebugInfo('Failed to initialize matcher');
+          setDebugInfo('Ready to scan - Show marker image');
+          await startCamera();
         }
       } catch (error) {
         console.error('Content loading error:', error);
-        setDebugInfo(`Error loading content: ${error.message}`);
+        setDebugInfo(`Error: ${error.message}`);
       }
     };
 
     loadContent();
-    
-    return () => {
-      if (matcher.current) {
-        matcher.current = null;
-      }
-    };
-  }, [contentKey]);
-
-  const startVideo = useCallback(async () => {
-    if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
-
-    try {
-      overlayVideoRef.current.src = videoUrl;
-      overlayVideoRef.current.muted = false;
-      await overlayVideoRef.current.play();
-      setIsVideoPlaying(true);
-      setDebugInfo('Video playing');
-    } catch (error) {
-      console.error('Video playback error:', error);
-      setDebugInfo('Tap to play video');
-      
-      const playOnTap = async () => {
-        try {
-          await overlayVideoRef.current?.play();
-          setIsVideoPlaying(true);
-          setDebugInfo('Video playing');
-          document.removeEventListener('click', playOnTap);
-        } catch (err) {
-          console.error('Playback error:', err);
-        }
-      };
-      
-      document.addEventListener('click', playOnTap);
-    }
-  }, [videoUrl, isVideoPlaying]);
-
-  const processFrame = useCallback(() => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-
-    if (!video || !canvas || !matcher.current) {
-      animationFrameRef.current = requestAnimationFrame(processFrame);
-      return;
-    }
-
-    const context = canvas.getContext('2d', { willReadFrequently: true });
-    
-    // Ensure canvas size matches video
-    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-    }
-
-    // Draw the current video frame
-    context.drawImage(video, 0, 0);
-    const frame = context.getImageData(0, 0, canvas.width, canvas.height);
-    
-    // Process the frame
-    const result = matcher.current.matchFrame(frame);
-    if (result.matched) {
-      setIsMarkerDetected(true);
-      setMatchConfidence(result.confidence);
-      setCanvasPosition(result.position);
-      setCanvasSize(result.size);
-
-      if (!isVideoPlaying) {
-        startVideo();
-      }
-    } else {
-      setIsMarkerDetected(false);
-      setMatchConfidence(0);
-    }
-
-    animationFrameRef.current = requestAnimationFrame(processFrame);
-  }, [startVideo, isVideoPlaying]);
-
-  useEffect(() => {
-    let stream = null;
-
-    const startCamera = async () => {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: 'environment',
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          }
-        });
-
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-          setDebugInfo('Camera ready - Show marker');
-          animationFrameRef.current = requestAnimationFrame(processFrame);
-        }
-      } catch (error) {
-        console.error('Camera error:', error);
-        setDebugInfo('Camera error - Please allow camera access');
-      }
-    };
-
-    if (videoUrl && imageUrl) {
-      startCamera();
-    }
 
     return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
     };
-  }, [processFrame, videoUrl, imageUrl]);
+  }, [contentKey, startCamera]);
 
   const styles = {
     container: {
       position: 'fixed',
       inset: 0,
-      backgroundColor: 'black'
+      backgroundColor: 'black',
+      overflow: 'hidden'
     },
     video: {
       position: 'absolute',
@@ -382,7 +323,6 @@ const App = () => {
       left: 0,
       width: '100%',
       height: '100%',
-      opacity: 0.5 // Make canvas visible for debugging
     },
     overlayVideo: {
       position: 'absolute',
@@ -393,6 +333,7 @@ const App = () => {
       height: `${canvasSize.height}vh`,
       objectFit: 'contain',
       zIndex: 20,
+      visibility: isMarkerDetected ? 'visible' : 'hidden',
       transition: 'all 0.1s ease-out'
     },
     debugInfo: {
@@ -415,8 +356,7 @@ const App = () => {
       zIndex: 30,
       fontSize: '14px',
       backgroundColor: isMarkerDetected ? 'rgba(0,255,0,0.7)' : 'rgba(255,0,0,0.7)',
-      color: 'white',
-      transition: 'background-color 0.3s ease'
+      color: 'white'
     },
     targetImage: {
       position: 'absolute',
@@ -424,8 +364,9 @@ const App = () => {
       right: 20,
       width: '100px',
       height: 'auto',
-      zIndex: 30,
-      border: '2px solid white'
+      border: '2px solid white',
+      borderRadius: '5px',
+      zIndex: 30
     }
   };
 
@@ -441,12 +382,13 @@ const App = () => {
       
       <canvas
         ref={canvasRef}
-style={styles.canvas}
+        style={styles.canvas}
       />
 
       {videoUrl && (
         <video
           ref={overlayVideoRef}
+          src={videoUrl}
           style={styles.overlayVideo}
           autoPlay
           playsInline
@@ -468,13 +410,31 @@ style={styles.canvas}
         <div>Status: {debugInfo}</div>
         <div>Match Confidence: {(matchConfidence * 100).toFixed(1)}%</div>
         <div>Marker Detected: {isMarkerDetected ? 'Yes' : 'No'}</div>
-        {imageUrl && <div>Target Image: Loaded</div>}
-        {videoUrl && <div>Video: {isVideoPlaying ? 'Playing' : 'Ready'}</div>}
       </div>
 
       <div style={styles.markerIndicator}>
         {isMarkerDetected ? 'Marker Detected' : 'Scanning...'}
       </div>
+
+      {cameraError && (
+        <div style={styles.errorMessage}>
+          Camera Error: {cameraError}
+          <button 
+            onClick={startCamera}
+            style={{
+marginTop: '10px',
+              padding: '5px 10px',
+              backgroundColor: 'white',
+              color: 'black',
+              border: 'none',
+              borderRadius: '3px',
+              cursor: 'pointer'
+            }}
+          >
+            Retry Camera
+          </button>
+        </div>
+      )}
     </div>
   );
 };
