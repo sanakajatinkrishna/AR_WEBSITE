@@ -1,14 +1,8 @@
+// App.js
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
-import { 
-  getFirestore, 
-  collection, 
-  query, 
-  where, 
-  getDocs, 
-  updateDoc,
-  increment 
-} from 'firebase/firestore';
+import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
+
 // Firebase Configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
@@ -26,157 +20,67 @@ const db = getFirestore(app);
 
 class ImageMatcher {
   constructor() {
-    this.targetImage = null;
-    this.targetCanvas = document.createElement('canvas');
-    this.targetCtx = this.targetCanvas.getContext('2d', { willReadFrequently: true });
-    this.searchCanvas = document.createElement('canvas');
-    this.searchCtx = this.searchCanvas.getContext('2d', { willReadFrequently: true });
-    this.matchThreshold = 0.6;
-    this.lastMatchTime = 0;
-    this.processEveryNthPixel = 1;
-    this.featurePoints = [];
+    this.templateImageData = null;
+    this.templateWidth = 0;
+    this.templateHeight = 0;
   }
 
   async initialize(imageUrl) {
     try {
-      console.log('Initializing with image URL:', imageUrl);
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-
-      return new Promise((resolve, reject) => {
-        img.onload = () => {
-          const maxSize = 300;
-          let width = img.width;
-          let height = img.height;
-
-          const aspectRatio = width / height;
-          if (width > height) {
-            width = maxSize;
-            height = maxSize / aspectRatio;
-          } else {
-            height = maxSize;
-            width = maxSize * aspectRatio;
-          }
-
-          this.targetCanvas.width = width;
-          this.targetCanvas.height = height;
-          this.targetCtx.drawImage(img, 0, 0, width, height);
-          
-          const imageData = this.targetCtx.getImageData(0, 0, width, height);
-          this.targetImage = {
-            data: imageData.data,
-            width: width,
-            height: height
-          };
-          
-          this.extractFeaturePoints(imageData);
-          console.log('Target image processed:', width, 'x', height);
-          resolve(true);
-        };
-
-        img.onerror = (error) => {
-          console.error('Failed to load target image:', error);
-          reject(new Error('Image load failed'));
-        };
-
-        img.src = imageUrl;
-      });
+      const response = await fetch(imageUrl);
+      const blob = await response.blob();
+      const img = await createImageBitmap(blob);
+      
+      // Create a canvas to process the template image
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      
+      this.templateImageData = ctx.getImageData(0, 0, img.width, img.height);
+      this.templateWidth = img.width;
+      this.templateHeight = img.height;
+      
+      console.log('Template initialized:', img.width, 'x', img.height);
+      return true;
     } catch (error) {
-      console.error('Target image initialization failed:', error);
-      throw error;
+      console.error('Template initialization failed:', error);
+      return false;
     }
   }
 
-  extractFeaturePoints(imageData) {
-    const { data, width, height } = imageData;
-    this.featurePoints = [];
-    
-    const gridSize = 20;
-    for (let y = 0; y < height; y += gridSize) {
-      for (let x = 0; x < width; x += gridSize) {
-        const idx = (y * width + x) * 4;
-        const r = data[idx];
-        const g = data[idx + 1];
-        const b = data[idx + 2];
-        
-        const gx = this.getGradientX(data, x, y, width);
-        const gy = this.getGradientY(data, x, y, width, height);
-        const gradient = Math.sqrt(gx * gx + gy * gy);
-        
-        if (gradient > 50) {
-          this.featurePoints.push({
-            x, y,
-            color: [r, g, b],
-            gradient
-          });
-        }
-      }
-    }
-  }
-
-  getGradientX(data, x, y, width) {
-    const idx = (y * width + x) * 4;
-    const left = x > 0 ? (y * width + (x - 1)) * 4 : idx;
-    const right = x < width - 1 ? (y * width + (x + 1)) * 4 : idx;
-    
-    return (
-      (data[right] - data[left]) +
-      (data[right + 1] - data[left + 1]) +
-      (data[right + 2] - data[left + 2])
-    ) / 3;
-  }
-
-  getGradientY(data, x, y, width, height) {
-    const idx = (y * width + x) * 4;
-    const up = y > 0 ? ((y - 1) * width + x) * 4 : idx;
-    const down = y < height - 1 ? ((y + 1) * width + x) * 4 : idx;
-    
-    return (
-      (data[down] - data[up]) +
-      (data[down + 1] - data[up + 1]) +
-      (data[down + 2] - data[up + 2])
-    ) / 3;
-  }
-
-  matchFrame(frame) {
-    if (!this.targetImage || !this.featurePoints.length) {
-      return { matched: false };
-    }
-
-    const now = Date.now();
-    if (now - this.lastMatchTime < 100) {
-      return { matched: false };
-    }
-    this.lastMatchTime = now;
-
-    const { width: frameWidth, height: frameHeight, data: frameData } = frame;
+  findMatches(frameImageData) {
+    const { width: frameWidth, height: frameHeight } = frameImageData;
+    const stepSize = 16; // Scan step size
     const scales = [0.5, 0.75, 1, 1.25, 1.5];
     let bestMatch = { score: 0, x: 0, y: 0, scale: 1 };
 
     for (const scale of scales) {
-      const searchWidth = Math.floor(this.targetImage.width * scale);
-      const searchHeight = Math.floor(this.targetImage.height * scale);
+      const searchWidth = Math.floor(this.templateWidth * scale);
+      const searchHeight = Math.floor(this.templateHeight * scale);
 
+      // Skip if scaled template is larger than frame
       if (searchWidth > frameWidth || searchHeight > frameHeight) continue;
 
-      const stepSize = Math.max(10, Math.floor(searchWidth * 0.1));
-      for (let y = 0; y <= frameHeight - searchHeight; y += stepSize) {
-        for (let x = 0; x <= frameWidth - searchWidth; x += stepSize) {
-          const score = this.compareRegionFeatures(frameData, frameWidth, x, y, scale);
+      for (let y = 0; y < frameHeight - searchHeight; y += stepSize) {
+        for (let x = 0; x < frameWidth - searchWidth; x += stepSize) {
+          const score = this.compareRegion(frameImageData, x, y, searchWidth, searchHeight);
           
           if (score > bestMatch.score) {
-            bestMatch = { score, x, y, width: searchWidth, height: searchHeight, scale };
+            bestMatch = { score, x, y, scale, width: searchWidth, height: searchHeight };
           }
         }
       }
     }
 
-    if (bestMatch.score > this.matchThreshold) {
+    // Return match if score is above threshold
+    if (bestMatch.score > 0.5) {
       return {
         matched: true,
         position: {
-          x: (bestMatch.x + bestMatch.width / 2) / frameWidth * 100,
-          y: (bestMatch.y + bestMatch.height / 2) / frameHeight * 100
+          x: (bestMatch.x + bestMatch.width/2) / frameWidth * 100,
+          y: (bestMatch.y + bestMatch.height/2) / frameHeight * 100
         },
         size: {
           width: (bestMatch.width / frameWidth) * 100,
@@ -189,34 +93,34 @@ class ImageMatcher {
     return { matched: false };
   }
 
-  compareRegionFeatures(frameData, frameWidth, offsetX, offsetY, scale) {
-    let matches = 0;
-    let total = this.featurePoints.length;
+  compareRegion(frameImageData, startX, startY, width, height) {
+    const { data: frameData } = frameImageData;
+    const { data: templateData } = this.templateImageData;
+    const frameWidth = frameImageData.width;
+    let totalDiff = 0;
+    let samples = 0;
+
+    // Compare downsampled regions for speed
+    const sampleStep = 4;
     
-    for (const point of this.featurePoints) {
-      const scaledX = Math.floor(point.x * scale) + offsetX;
-      const scaledY = Math.floor(point.y * scale) + offsetY;
-      
-      const idx = (scaledY * frameWidth + scaledX) * 4;
-      const frameColor = [
-        frameData[idx],
-        frameData[idx + 1],
-        frameData[idx + 2]
-      ];
-      
-      if (this.compareColors(point.color, frameColor)) {
-        matches++;
+    for (let y = 0; y < height; y += sampleStep) {
+      for (let x = 0; x < width; x += sampleStep) {
+        const frameIdx = ((startY + y) * frameWidth + (startX + x)) * 4;
+        const templateIdx = (Math.floor(y * this.templateHeight / height) * this.templateWidth + 
+                           Math.floor(x * this.templateWidth / width)) * 4;
+
+        // Compare RGB values
+        const rDiff = Math.abs(frameData[frameIdx] - templateData[templateIdx]);
+        const gDiff = Math.abs(frameData[frameIdx + 1] - templateData[templateIdx + 1]);
+        const bDiff = Math.abs(frameData[frameIdx + 2] - templateData[templateIdx + 2]);
+        
+        totalDiff += (rDiff + gDiff + bDiff) / 3;
+        samples++;
       }
     }
-    
-    return matches / total;
-  }
 
-  compareColors(color1, color2) {
-    const threshold = 30;
-    return Math.abs(color1[0] - color2[0]) < threshold &&
-           Math.abs(color1[1] - color2[1]) < threshold &&
-           Math.abs(color1[2] - color2[2]) < threshold;
+    // Convert difference to similarity score (0-1)
+    return 1 - (totalDiff / (samples * 255));
   }
 }
 
@@ -226,20 +130,16 @@ const App = () => {
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const animationFrameRef = useRef(null);
-  const matcher = useRef(null);
-  const docRef = useRef(null);
+  const imageMatcher = useRef(new ImageMatcher());
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
-  const [imageUrl, setImageUrl] = useState(null);
   const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
   const [canvasSize, setCanvasSize] = useState({ width: 40, height: 40 });
   const [matchConfidence, setMatchConfidence] = useState(0);
   const [isMarkerDetected, setIsMarkerDetected] = useState(false);
-  const [lastViewUpdate, setLastViewUpdate] = useState(0);
 
-  // Initialize content and matcher
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -262,18 +162,13 @@ const App = () => {
           return;
         }
 
-        const doc = snapshot.docs[0];
-        docRef.current = doc.ref;
-        const data = doc.data();
-        
+        const data = snapshot.docs[0].data();
+        console.log('Content loaded:', data);
         setVideoUrl(data.videoUrl);
-        setImageUrl(data.imageUrl);
         
-        matcher.current = new ImageMatcher();
-        const initialized = await matcher.current.initialize(data.imageUrl);
-        
+        const initialized = await imageMatcher.current.initialize(data.imageUrl);
         if (initialized) {
-          setDebugInfo('Ready - Show marker image');
+          setDebugInfo('Ready - Show image marker');
         } else {
           setDebugInfo('Failed to initialize matcher');
         }
@@ -284,15 +179,8 @@ const App = () => {
     };
 
     loadContent();
-    
-    return () => {
-      if (matcher.current) {
-        matcher.current = null;
-      }
-    };
   }, [contentKey]);
 
-  // Handle video playback
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
@@ -302,24 +190,9 @@ const App = () => {
       await overlayVideoRef.current.play();
       setIsVideoPlaying(true);
       setDebugInfo('Video playing');
-
-      // Update view count
-      if (docRef.current) {
-        const now = Date.now();
-        if (now - lastViewUpdate > 60000) { // Update once per minute
-          try {
-            await updateDoc(docRef.current, {
-              views: increment(1)
-            });
-            setLastViewUpdate(now);
-          } catch (error) {
-            console.error('Error updating view count:', error);
-          }
-        }
-      }
     } catch (error) {
       console.error('Video playback error:', error);
-      setDebugInfo('Tap to play video');
+      setDebugInfo('Tap screen for sound');
       
       const playOnTap = async () => {
         try {
@@ -334,14 +207,13 @@ const App = () => {
       
       document.addEventListener('click', playOnTap);
     }
-  }, [videoUrl, isVideoPlaying, lastViewUpdate]);
+  }, [videoUrl, isVideoPlaying]);
 
-  // Process video frames
   const processFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
-    if (!video || !canvas || !matcher.current) {
+    if (!video || !canvas) {
       animationFrameRef.current = requestAnimationFrame(processFrame);
       return;
     }
@@ -354,9 +226,9 @@ const App = () => {
     }
 
     context.drawImage(video, 0, 0);
-    const frame = context.getImageData(0, 0, canvas.width, canvas.height);
+    const currentFrame = context.getImageData(0, 0, canvas.width, canvas.height);
     
-    const result = matcher.current.matchFrame(frame);
+    const result = imageMatcher.current.findMatches(currentFrame);
     if (result.matched) {
       setIsMarkerDetected(true);
       setMatchConfidence(result.confidence);
@@ -374,66 +246,32 @@ const App = () => {
     animationFrameRef.current = requestAnimationFrame(processFrame);
   }, [startVideo, isVideoPlaying]);
 
-  // Initialize camera
   useEffect(() => {
     let stream = null;
 
     const startCamera = async () => {
       try {
-        // Request highest quality video possible
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
-            // Ask for highest quality
-            width: { ideal: 4096 },
-            height: { ideal: 2160 },
-            frameRate: { ideal: 60 },
-            // Request best quality
-            advanced: [
-              {
-                // Prioritize resolution and focus
-                autoFocus: 'continuous',
-                focusMode: 'continuous',
-                exposureMode: 'continuous',
-                whiteBalanceMode: 'continuous'
-              }
-            ]
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
           }
         });
 
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          // Set video element to maintain quality
-          videoRef.current.setAttribute('playsinline', true);
           await videoRef.current.play();
           setDebugInfo('Camera ready - Show marker');
           animationFrameRef.current = requestAnimationFrame(processFrame);
         }
       } catch (error) {
         console.error('Camera error:', error);
-        // If high quality fails, try fallback options
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-              facingMode: 'environment',
-            }
-          });
-          
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            videoRef.current.setAttribute('playsinline', true);
-            await videoRef.current.play();
-            setDebugInfo('Camera ready (fallback mode)');
-            animationFrameRef.current = requestAnimationFrame(processFrame);
-          }
-        } catch (fallbackError) {
-          console.error('Fallback camera error:', fallbackError);
-          setDebugInfo('Camera error - Please allow camera access');
-        }
+        setDebugInfo(`Camera error: ${error.message}`);
       }
     };
 
-    if (videoUrl && imageUrl) {
+    if (videoUrl) {
       startCamera();
     }
 
@@ -445,8 +283,7 @@ const App = () => {
         stream.getTracks().forEach(track => track.stop());
       }
     };
-  }, [processFrame, videoUrl, imageUrl]);
-
+  }, [processFrame, videoUrl]);
 
   const styles = {
     container: {
@@ -458,10 +295,7 @@ const App = () => {
       position: 'absolute',
       width: '100%',
       height: '100%',
-      objectFit: 'cover',
-            imageRendering: 'high-quality',
-      willChange: 'transform'
-
+      objectFit: 'cover'
     },
     canvas: {
       position: 'absolute',
@@ -469,7 +303,7 @@ const App = () => {
       left: 0,
       width: '100%',
       height: '100%',
-      opacity: 0.5
+      display: 'none'
     },
     overlayVideo: {
       position: 'absolute',
@@ -480,8 +314,7 @@ const App = () => {
       height: `${canvasSize.height}vh`,
       objectFit: 'contain',
       zIndex: 20,
-      transition: 'all 0.1s ease-out',
-      display: isMarkerDetected ? 'block' : 'none'
+      transition: 'all 0.1s ease-out'
     },
     debugInfo: {
       position: 'absolute',
@@ -492,8 +325,7 @@ const App = () => {
       padding: '10px',
       borderRadius: '5px',
       zIndex: 30,
-      fontSize: '14px',
-      fontFamily: 'monospace'
+      fontSize: '14px'
     },
     markerIndicator: {
       position: 'absolute',
@@ -505,38 +337,12 @@ const App = () => {
       fontSize: '14px',
       backgroundColor: isMarkerDetected ? 'rgba(0,255,0,0.7)' : 'rgba(255,0,0,0.7)',
       color: 'white',
-      transition: 'background-color 0.3s ease',
-       imageRendering: 'high-quality',
-      willChange: 'transform'
-    },
-    targetImage: {
-      position: 'absolute',
-      bottom: 20,
-      right: 20,
-      width: '100px',
-      height: 'auto',
-      zIndex: 30,
-      border: '2px solid white',
-      borderRadius: '5px',
-      opacity: 0.8
-    },
-    performanceStats: {
-      position: 'absolute',
-      bottom: 20,
-      left: 20,
-      backgroundColor: 'rgba(0,0,0,0.7)',
-      color: 'white',
-      padding: '10px',
-      borderRadius: '5px',
-      zIndex: 30,
-      fontSize: '12px',
-      fontFamily: 'monospace'
+      transition: 'background-color 0.3s ease'
     }
   };
 
   return (
     <div style={styles.container}>
-      {/* Camera Feed */}
       <video
         ref={videoRef}
         autoPlay
@@ -545,13 +351,11 @@ const App = () => {
         style={styles.video}
       />
       
-      {/* Processing Canvas */}
       <canvas
         ref={canvasRef}
         style={styles.canvas}
       />
 
-      {/* AR Video Overlay */}
       {videoUrl && (
         <video
           ref={overlayVideoRef}
@@ -564,32 +368,15 @@ const App = () => {
         />
       )}
 
-      {/* Target Image Preview */}
-      {imageUrl && (
-        <img
-          src={imageUrl}
-          alt="Target marker"
-          style={styles.targetImage}
-        />
-      )}
-
-      {/* Debug Information */}
       <div style={styles.debugInfo}>
         <div>Status: {debugInfo}</div>
-        <div>Confidence: {(matchConfidence * 100).toFixed(1)}%</div>
-        <div>Position: {Math.round(canvasPosition.x)}%, {Math.round(canvasPosition.y)}%</div>
-        <div>Size: {Math.round(canvasSize.width)}%, {Math.round(canvasSize.height)}%</div>
+        <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
+        <div>Match Confidence: {(matchConfidence * 100).toFixed(1)}%</div>
+        <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
       </div>
 
-      {/* Marker Detection Indicator */}
       <div style={styles.markerIndicator}>
         {isMarkerDetected ? 'Marker Detected' : 'Scanning...'}
-      </div>
-
-      {/* Performance Stats */}
-      <div style={styles.performanceStats}>
-        <div>FPS: {Math.round(1000 / (Date.now() - lastViewUpdate))}</div>
-        <div>Resolution: {videoRef.current?.videoWidth || 0}x{videoRef.current?.videoHeight || 0}</div>
       </div>
     </div>
   );
