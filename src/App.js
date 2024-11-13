@@ -1,6 +1,7 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
+import { getStorage, ref, getDownloadURL } from 'firebase/storage';
 
 // Firebase Configuration
 const firebaseConfig = {
@@ -16,6 +17,7 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+const storage = getStorage(app);
 
 const App = () => {
   const contentKey = new URLSearchParams(window.location.search).get('key');
@@ -34,32 +36,36 @@ const App = () => {
   const [matchPosition, setMatchPosition] = useState({ x: 50, y: 50, scale: 1 });
   const [isMatched, setIsMatched] = useState(false);
 
-  // Start video playback
   const startVideo = useCallback(async () => {
-    if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
+    if (!overlayVideoRef.current || !videoUrl) return;
 
     try {
       overlayVideoRef.current.src = videoUrl;
       overlayVideoRef.current.muted = false;
       await overlayVideoRef.current.play();
       setIsVideoPlaying(true);
+      setDebugInfo('Video playing');
     } catch (error) {
-      console.error('Video playback error:', error);
-      setDebugInfo('Click to enable video playback');
+      console.log('Video playback error - Click to play');
       
-      const playOnClick = () => {
-        overlayVideoRef.current?.play()
-          .then(() => {
+      const playOnClick = async () => {
+        try {
+          if (overlayVideoRef.current) {
+            await overlayVideoRef.current.play();
             setIsVideoPlaying(true);
+            setDebugInfo('Video playing');
             document.removeEventListener('click', playOnClick);
-          })
-          .catch(console.error);
+          }
+        } catch (err) {
+          setDebugInfo('Video playback failed');
+        }
       };
+      
       document.addEventListener('click', playOnClick);
+      setDebugInfo('Click to play video');
     }
-  }, [videoUrl, isVideoPlaying]);
+  }, [videoUrl]);
 
-  // Image matching function
   const matchImages = useCallback((currentImageData, width, height) => {
     if (!referenceImageRef.current) return null;
 
@@ -68,15 +74,12 @@ const App = () => {
     tempCanvas.width = width;
     tempCanvas.height = height;
     
-    // Draw reference image
     tempCtx.drawImage(referenceImageRef.current, 0, 0, width, height);
     const referenceData = tempCtx.getImageData(0, 0, width, height).data;
     
-    // Compare image data
     let matchScore = 0;
     let totalPixels = currentImageData.data.length / 4;
     
-    // Sample every 4th pixel for performance
     for (let i = 0; i < currentImageData.data.length; i += 16) {
       const currentR = currentImageData.data[i];
       const currentG = currentImageData.data[i + 1];
@@ -86,18 +89,15 @@ const App = () => {
       const refG = referenceData[i + 1];
       const refB = referenceData[i + 2];
       
-      // Calculate color difference
       const diff = Math.abs(currentR - refR) + Math.abs(currentG - refG) + Math.abs(currentB - refB);
-      if (diff < 150) { // Threshold for color matching
+      if (diff < 150) {
         matchScore++;
       }
     }
     
-    // Calculate match percentage
     const matchPercentage = (matchScore / (totalPixels / 4)) * 100;
     
     if (matchPercentage > 50) {
-      // Calculate position based on matched region
       const x = (width / 2 / width) * 100;
       const y = (height / 2 / height) * 100;
       
@@ -129,7 +129,6 @@ const App = () => {
     
     context.drawImage(video, 0, 0);
     
-    // Process center region of frame
     const processWidth = canvas.width * 0.8;
     const processHeight = canvas.height * 0.8;
     const x = (canvas.width - processWidth) / 2;
@@ -139,7 +138,6 @@ const App = () => {
     const matchResult = matchImages(imageData, processWidth, processHeight);
     
     if (matchResult?.matched) {
-      // Smooth position updates
       matchPositionRef.current = {
         x: matchPositionRef.current.x * 0.8 + matchResult.position.x * 0.2,
         y: matchPositionRef.current.y * 0.8 + matchResult.position.y * 0.2,
@@ -151,17 +149,16 @@ const App = () => {
       if (!isMatched) {
         setIsMatched(true);
         startVideo();
-        setDebugInfo(`Match found (${matchResult.matchPercentage.toFixed(1)}% confidence)`);
+        setDebugInfo(`Match found (${matchResult.matchPercentage.toFixed(1)}%)`);
       }
     } else if (isMatched) {
       setIsMatched(false);
-      setDebugInfo('Lost match - Show image to camera');
+      setDebugInfo('Show image to camera');
     }
 
     animationFrameRef.current = requestAnimationFrame(processFrame);
   }, [matchImages, isMatched, startVideo]);
 
-  // Load content and reference image
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -170,6 +167,8 @@ const App = () => {
       }
 
       try {
+        setDebugInfo('Loading content...');
+
         const arContentRef = collection(db, 'arContent');
         const q = query(
           arContentRef,
@@ -180,28 +179,46 @@ const App = () => {
         const snapshot = await getDocs(q);
         
         if (snapshot.empty) {
-          setDebugInfo('Invalid or inactive content');
+          setDebugInfo('Content not found');
           return;
         }
 
         const doc = snapshot.docs[0];
         const data = doc.data();
-        
-        setVideoUrl(data.videoUrl);
-        setReferenceImageUrl(data.imageUrl);
-        setDebugInfo('Content loaded - Loading reference image...');
 
-        // Preload reference image
+        // Handle video URL
+        if (data.videoUrl.startsWith('videos/')) {
+          const videoRef = ref(storage, data.videoUrl);
+          const videoDownloadUrl = await getDownloadURL(videoRef);
+          setVideoUrl(videoDownloadUrl);
+        } else {
+          setVideoUrl(data.videoUrl);
+        }
+
+        // Handle image URL
+        let finalImageUrl;
+        if (data.imageUrl.startsWith('images/')) {
+          const imageRef = ref(storage, data.imageUrl);
+          finalImageUrl = await getDownloadURL(imageRef);
+        } else {
+          finalImageUrl = data.imageUrl;
+        }
+
+        setReferenceImageUrl(finalImageUrl);
+        setDebugInfo('Loading reference image...');
+
         const img = new Image();
         img.crossOrigin = "anonymous";
         img.onload = () => {
           referenceImageRef.current = img;
           setDebugInfo('Ready - Show image to camera');
         };
-        img.src = data.imageUrl;
+        img.onerror = () => {
+          setDebugInfo('Failed to load reference image');
+        };
+        img.src = finalImageUrl;
 
       } catch (error) {
-        console.error('Content loading error:', error);
         setDebugInfo(`Error: ${error.message}`);
       }
     };
@@ -209,8 +226,9 @@ const App = () => {
     loadContent();
   }, [contentKey]);
 
-  // Initialize camera
   useEffect(() => {
+    if (!referenceImageUrl) return;
+
     let cleanup = { stop: () => {} };
 
     const startCamera = async () => {
@@ -226,7 +244,6 @@ const App = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-          setDebugInfo('Camera ready - Loading content...');
           animationFrameRef.current = requestAnimationFrame(processFrame);
         }
 
@@ -234,14 +251,11 @@ const App = () => {
           stream.getTracks().forEach(track => track.stop());
         };
       } catch (error) {
-        console.error('Camera error:', error);
         setDebugInfo(`Camera error: ${error.message}`);
       }
     };
 
-    if (referenceImageUrl) {
-      startCamera();
-    }
+    startCamera();
 
     return () => {
       if (animationFrameRef.current) {
@@ -324,6 +338,7 @@ const App = () => {
 
       <div style={styles.debugInfo}>
         <div>Status: {debugInfo}</div>
+        <div>Content Key: {contentKey || 'Not found'}</div>
         <div>Match Found: {isMatched ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
       </div>
