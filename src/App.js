@@ -1,4 +1,3 @@
-// App.js
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
@@ -19,23 +18,151 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const App = () => {
-  // Get content key directly from URL
   const contentKey = new URLSearchParams(window.location.search).get('key');
-
+  
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
+  const referenceImageRef = useRef(null);
+  const referenceCanvasRef = useRef(null);
   const animationFrameRef = useRef(null);
-  const trackedPositionRef = useRef({ x: 50, y: 50 });
-
+  
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
-  const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
-  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
-  const [isCanvasDetected, setIsCanvasDetected] = useState(false);
+  const [imageUrl, setImageUrl] = useState(null);
+  const [isMatched, setIsMatched] = useState(false);
+  const [matchConfidence, setMatchConfidence] = useState(0);
 
-  // Load content based on key
+  // Start video playback
+  const startVideo = useCallback(async () => {
+    if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
+
+    try {
+      overlayVideoRef.current.src = videoUrl;
+      overlayVideoRef.current.muted = false;
+      await overlayVideoRef.current.play();
+      setIsVideoPlaying(true);
+    } catch (error) {
+      console.error('Video playback error:', error);
+      setDebugInfo('Click to play video with sound');
+    }
+  }, [videoUrl, isVideoPlaying]);
+
+  // Image matching helper functions
+  const calculateHistogram = (imageData) => {
+    const hist = Array(256).fill(0);
+    for (let i = 0; i < imageData.length; i += 4) {
+      const brightness = Math.floor((imageData[i] + imageData[i + 1] + imageData[i + 2]) / 3);
+      hist[brightness]++;
+    }
+    return hist;
+  };
+
+  const compareHistograms = (hist1, hist2) => {
+    let difference = 0;
+    const total = hist1.reduce((a, b) => a + b, 0);
+    
+    for (let i = 0; i < 256; i++) {
+      const h1 = hist1[i] / total;
+      const h2 = hist2[i] / total;
+      difference += Math.abs(h1 - h2);
+    }
+    
+    return difference / 2;
+  };
+
+  // Image comparison function
+  const compareImages = useCallback((sourceImageData, targetImageData) => {
+    const sourceData = sourceImageData.data;
+    const targetData = targetImageData.data;
+    
+    // Calculate average colors for both images
+    let sourceTotals = [0, 0, 0];
+    let targetTotals = [0, 0, 0];
+    
+    for (let i = 0; i < sourceData.length; i += 4) {
+      sourceTotals[0] += sourceData[i];
+      sourceTotals[1] += sourceData[i + 1];
+      sourceTotals[2] += sourceData[i + 2];
+      
+      targetTotals[0] += targetData[i];
+      targetTotals[1] += targetData[i + 1];
+      targetTotals[2] += targetData[i + 2];
+    }
+    
+    const pixelCount = sourceData.length / 4;
+    const sourceAvg = sourceTotals.map(total => total / pixelCount);
+    const targetAvg = targetTotals.map(total => total / pixelCount);
+    
+    // Calculate color difference
+    let difference = 0;
+    for (let i = 0; i < 3; i++) {
+      difference += Math.abs(sourceAvg[i] - targetAvg[i]);
+    }
+    
+    // Calculate histogram difference
+    const sourceHist = calculateHistogram(sourceData);
+    const targetHist = calculateHistogram(targetData);
+    const histDiff = compareHistograms(sourceHist, targetHist);
+    
+    // Combined confidence score (0-100)
+    const colorConfidence = Math.max(0, 100 - (difference / 7.65));
+    const histConfidence = Math.max(0, 100 - (histDiff * 100));
+    
+    return (colorConfidence * 0.4 + histConfidence * 0.6);
+  }, []);
+
+  // Process video frames
+  const processFrame = useCallback(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const refCanvas = referenceCanvasRef.current;
+
+    if (!video || !canvas || !refCanvas || !referenceImageRef.current) {
+      animationFrameRef.current = requestAnimationFrame(processFrame);
+      return;
+    }
+
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+    
+    context.drawImage(video, 0, 0);
+    
+    // Get center portion of camera feed
+    const centerWidth = canvas.width * 0.6;
+    const centerHeight = canvas.height * 0.6;
+    const x = (canvas.width - centerWidth) / 2;
+    const y = (canvas.height - centerHeight) / 2;
+    
+    const cameraData = context.getImageData(x, y, centerWidth, centerHeight);
+    const referenceData = refCanvas.getContext('2d').getImageData(
+      0, 0, refCanvas.width, refCanvas.height
+    );
+    
+    const confidence = compareImages(cameraData, referenceData);
+    setMatchConfidence(confidence);
+    
+    // Update match status and play video if confidence is high enough
+    if (confidence > 50 && !isMatched) {
+      setIsMatched(true);
+      startVideo();
+    } else if (confidence < 40 && isMatched) {
+      setIsMatched(false);
+      if (overlayVideoRef.current) {
+        overlayVideoRef.current.pause();
+      }
+    }
+
+    setDebugInfo(`Match confidence: ${confidence.toFixed(1)}%`);
+    animationFrameRef.current = requestAnimationFrame(processFrame);
+  }, [compareImages, isMatched, startVideo]);
+
+  // Load content from Firebase
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -45,7 +172,7 @@ const App = () => {
 
       try {
         console.log('Loading content for key:', contentKey);
-        setDebugInfo('Verifying content...');
+        setDebugInfo('Loading content...');
 
         const arContentRef = collection(db, 'arContent');
         const q = query(
@@ -57,17 +184,29 @@ const App = () => {
         const snapshot = await getDocs(q);
         
         if (snapshot.empty) {
-          console.log('No content found');
           setDebugInfo('Invalid or inactive content');
           return;
         }
 
         const doc = snapshot.docs[0];
         const data = doc.data();
-        console.log('Content found:', data);
-
+        
         setVideoUrl(data.videoUrl);
+        setImageUrl(data.imageUrl);
         setDebugInfo('Content loaded - Please show image');
+
+        // Load reference image
+        const img = new Image();
+        img.crossOrigin = 'Anonymous';
+        img.src = data.imageUrl;
+        img.onload = () => {
+          referenceImageRef.current = img;
+          const canvas = referenceCanvasRef.current;
+          const ctx = canvas.getContext('2d');
+          canvas.width = img.width;
+          canvas.height = img.height;
+          ctx.drawImage(img, 0, 0);
+        };
 
       } catch (error) {
         console.error('Content loading error:', error);
@@ -78,265 +217,71 @@ const App = () => {
     loadContent();
   }, [contentKey]);
 
-  const detectCanvas = useCallback((imageData) => {
-    const width = imageData.width;
-    const height = imageData.height;
-    
-    let totalR = 0, totalG = 0, totalB = 0;
-    let samples = 0;
-
-    for (let y = 0; y < height; y += 4) {
-      for (let x = 0; x < width; x += 4) {
-        const i = (y * width + x) * 4;
-        totalR += imageData.data[i];
-        totalG += imageData.data[i + 1];
-        totalB += imageData.data[i + 2];
-        samples++;
-      }
-    }
-
-    const avgR = totalR / samples;
-    const avgG = totalG / samples;
-    const avgB = totalB / samples;
-
-    const hasContent = (avgR > 30 || avgG > 30 || avgB > 30) && 
-                      (avgR < 240 || avgG < 240 || avgB < 240);
-
-    if (hasContent) {
-      let left = width, right = 0, top = height, bottom = 0;
-
-      for (let y = 0; y < height; y += 2) {
-        for (let x = 0; x < width; x += 2) {
-          const i = (y * width + x) * 4;
-          const r = imageData.data[i];
-          const g = imageData.data[i + 1];
-          const b = imageData.data[i + 2];
-
-          if (Math.abs(r - avgR) > 20 || Math.abs(g - avgG) > 20 || Math.abs(b - avgB) > 20) {
-            left = Math.min(left, x);
-            right = Math.max(right, x);
-            top = Math.min(top, y);
-            bottom = Math.max(bottom, y);
-          }
-        }
-      }
-
-      const centerX = (left + right) / 2;
-      const centerY = (top + bottom) / 2;
-      const objWidth = right - left;
-      const objHeight = bottom - top;
-
-      const posX = (centerX / width) * 100;
-      const posY = (centerY / height) * 100;
-
-      trackedPositionRef.current.x = trackedPositionRef.current.x * 0.8 + posX * 0.2;
-      trackedPositionRef.current.y = trackedPositionRef.current.y * 0.8 + posY * 0.2;
-
-      return {
-        position: { x: trackedPositionRef.current.x, y: trackedPositionRef.current.y },
-        size: { width: objWidth, height: objHeight },
-        detected: true
-      };
-    }
-
-    return { detected: false };
-  }, []);
-
-  const startVideo = useCallback(async () => {
-    if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
-
-    try {
-      overlayVideoRef.current.src = videoUrl;
-      overlayVideoRef.current.muted = false;
-      await overlayVideoRef.current.play();
-      setIsVideoPlaying(true);
-      setDebugInfo('Video playing with sound');
-    } catch (error) {
-      console.error('Video playback error:', error);
-      setDebugInfo('Click anywhere to play video with sound');
-      
-      const playOnClick = () => {
-        if (overlayVideoRef.current) {
-          overlayVideoRef.current.play()
-            .then(() => {
-              setIsVideoPlaying(true);
-              setDebugInfo('Video playing with sound');
-              document.removeEventListener('click', playOnClick);
-            })
-            .catch(console.error);
-        }
-      };
-      document.addEventListener('click', playOnClick);
-    }
-  }, [videoUrl, isVideoPlaying]);
-
-  const processFrame = useCallback(() => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-
-    if (!video || !canvas) {
-      animationFrameRef.current = requestAnimationFrame(processFrame);
-      return;
-    }
-
-    const context = canvas.getContext('2d', { 
-      willReadFrequently: true,
-      alpha: false 
-    });
-
-    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-    }
-    
-    context.drawImage(video, 0, 0);
-    
-    const centerWidth = canvas.width * 0.5;
-    const centerHeight = canvas.height * 0.5;
-    const x = (canvas.width - centerWidth) / 2;
-    const y = (canvas.height - centerHeight) / 2;
-    
-    const imageData = context.getImageData(x, y, centerWidth, centerHeight);
-    const result = detectCanvas(imageData);
-    
-    if (result.detected) {
-      setCanvasPosition(result.position);
-      setCanvasSize(result.size);
-      
-      if (!isCanvasDetected) {
-        setIsCanvasDetected(true);
-        startVideo();
-      }
-    } else if (isCanvasDetected) {
-      setIsCanvasDetected(false);
-    }
-
-    animationFrameRef.current = requestAnimationFrame(processFrame);
-  }, [detectCanvas, startVideo, isCanvasDetected]);
-
+  // Initialize camera
   useEffect(() => {
-    let isComponentMounted = true;
-    let currentStream = null;
+    let stream = null;
 
     const startCamera = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
             width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30 }
+            height: { ideal: 720 }
           }
         });
 
-        if (!isComponentMounted) return;
-
-        const videoTrack = stream.getVideoTracks()[0];
-        await videoTrack.applyConstraints({
-          advanced: [
-            { exposureMode: "continuous" },
-            { focusMode: "continuous" },
-            { whiteBalanceMode: "continuous" }
-          ]
-        }).catch(() => {});
-
-        currentStream = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-          console.log('Camera started');
-          
-          if (isComponentMounted) {
-            setDebugInfo('Camera ready - Show image');
-            animationFrameRef.current = requestAnimationFrame(processFrame);
-          }
+          animationFrameRef.current = requestAnimationFrame(processFrame);
         }
       } catch (error) {
         console.error('Camera error:', error);
-        if (isComponentMounted) {
-          setDebugInfo(`Camera error: ${error.message}`);
-        }
+        setDebugInfo(`Camera error: ${error.message}`);
       }
     };
 
-    if (videoUrl) {
-      console.log('Starting camera');
+    if (imageUrl && videoUrl) {
       startCamera();
     }
 
     return () => {
-      isComponentMounted = false;
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
-      if (currentStream) {
-        currentStream.getTracks().forEach(track => track.stop());
-      }
     };
-  }, [processFrame, videoUrl]);
-
-  const styles = {
-    container: {
-      position: 'fixed',
-      inset: 0,
-      backgroundColor: 'black'
-    },
-    video: {
-      position: 'absolute',
-      width: '100%',
-      height: '100%',
-      objectFit: 'cover'
-    },
-    canvas: {
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      width: '100%',
-      height: '100%',
-      display: 'none'
-    },
-    overlayVideo: {
-      position: 'absolute',
-      top: `${canvasPosition.y}%`,
-      left: `${canvasPosition.x}%`,
-      transform: 'translate(-50%, -50%)',
-      width: `${Math.min(canvasSize.width * 1.2, 40)}vw`,
-      height: `${Math.min(canvasSize.height * 1.2, 40)}vh`,
-      objectFit: 'contain',
-      zIndex: 20,
-      transition: 'all 0.1s ease-out'
-    },
-    debugInfo: {
-      position: 'absolute',
-      top: 20,
-      left: 20,
-      backgroundColor: 'rgba(0,0,0,0.7)',
-      color: 'white',
-      padding: '10px',
-      borderRadius: '5px',
-      zIndex: 30
-    }
-  };
+  }, [imageUrl, videoUrl, processFrame]);
 
   return (
-    <div style={styles.container}>
+    <div className="fixed inset-0 bg-black">
       <video
         ref={videoRef}
+        className="absolute w-full h-full object-cover"
         autoPlay
         playsInline
         muted
-        style={styles.video}
       />
 
       <canvas
         ref={canvasRef}
-        style={styles.canvas}
+        className="hidden"
+      />
+
+      <canvas
+        ref={referenceCanvasRef}
+        className="hidden"
       />
 
       {videoUrl && (
         <video
           ref={overlayVideoRef}
-          style={styles.overlayVideo}
+          className={`absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-4/5 h-4/5 object-contain transition-opacity duration-300 ${
+            isMatched ? 'opacity-100' : 'opacity-0'
+          }`}
           autoPlay
           playsInline
           loop
@@ -345,12 +290,10 @@ const App = () => {
         />
       )}
 
-      <div style={styles.debugInfo}>
+      <div className="absolute top-5 left-5 bg-black/70 text-white p-3 rounded-lg">
         <div>Status: {debugInfo}</div>
-        <div>Key: {contentKey || 'Not found'}</div>
-        <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
-        <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
-        <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
+        <div>Match: {isMatched ? 'Yes' : 'No'}</div>
+        <div>Confidence: {matchConfidence.toFixed(1)}%</div>
       </div>
     </div>
   );
