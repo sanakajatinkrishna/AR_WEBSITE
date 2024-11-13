@@ -1,6 +1,7 @@
 // App.js
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
+import { getStorage, ref, getDownloadURL } from 'firebase/storage';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
 
 // Firebase Configuration
@@ -17,6 +18,7 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+const storage = getStorage(app);
 
 const App = () => {
   // Get content key directly from URL
@@ -85,6 +87,7 @@ const App = () => {
     let totalR = 0, totalG = 0, totalB = 0;
     let samples = 0;
 
+    // Sample pixels for average color
     for (let y = 0; y < height; y += 4) {
       for (let x = 0; x < width; x += 4) {
         const i = (y * width + x) * 4;
@@ -214,6 +217,7 @@ const App = () => {
     animationFrameRef.current = requestAnimationFrame(processFrame);
   }, [detectCanvas, startVideo, isCanvasDetected]);
 
+  // Initialize camera
   useEffect(() => {
     let isComponentMounted = true;
     let currentStream = null;
