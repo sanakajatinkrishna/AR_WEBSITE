@@ -2,6 +2,7 @@ import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
 
+// Firebase config remains the same
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -15,6 +16,12 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
+const MATCHING_THRESHOLD = 50; // Percentage match required
+const SCAN_STEP = 20; // Pixels to move when scanning
+const MIN_SCAN_SIZE = 100; // Minimum size to scan for
+const MAX_SCAN_SIZE = 400; // Maximum size to scan for
+const SIZE_STEP = 50; // Size increment for scanning
+
 const App = () => {
   const contentKey = new URLSearchParams(window.location.search).get('key');
   
@@ -22,83 +29,101 @@ const App = () => {
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const animationFrameRef = useRef(null);
-  const trackedPositionRef = useRef({ x: 50, y: 50 });
   const referenceImageRef = useRef(null);
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
   const [imageUrl, setImageUrl] = useState(null);
-  const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
-  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
-  const [isCanvasDetected, setIsCanvasDetected] = useState(false);
   const [matchPercentage, setMatchPercentage] = useState(0);
+  const [bestMatch, setBestMatch] = useState(null);
 
-  const calculateImageMatch = useCallback((capturedImageData, referenceCanvas) => {
+  const calculateImageMatch = useCallback((capturedCtx, x, y, width, height, referenceCanvas) => {
     if (!referenceCanvas) return 0;
 
-    const refCtx = referenceCanvas.getContext('2d');
-    const refImageData = refCtx.getImageData(0, 0, referenceCanvas.width, referenceCanvas.height);
-    
-    let matchingPixels = 0;
-    const totalPixels = capturedImageData.width * capturedImageData.height;
-    
-    // Compare every 4th pixel (RGBA values)
-    for (let i = 0; i < capturedImageData.data.length; i += 16) {
-      const capturedR = capturedImageData.data[i];
-      const capturedG = capturedImageData.data[i + 1];
-      const capturedB = capturedImageData.data[i + 2];
+    try {
+      // Get the image data from the captured region
+      const capturedData = capturedCtx.getImageData(x, y, width, height);
       
-      const refR = refImageData.data[i];
-      const refG = refImageData.data[i + 1];
-      const refB = refImageData.data[i + 2];
-      
-      // Calculate color difference
-      const colorDiff = Math.sqrt(
-        Math.pow(capturedR - refR, 2) +
-        Math.pow(capturedG - refG, 2) +
-        Math.pow(capturedB - refB, 2)
-      );
-      
-      // If colors are similar enough
-      if (colorDiff < 100) {
-        matchingPixels++;
+      // Scale the reference image to match the captured size
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = width;
+      tempCanvas.height = height;
+      const tempCtx = tempCanvas.getContext('2d');
+      tempCtx.drawImage(referenceCanvas, 0, 0, width, height);
+      const referenceData = tempCtx.getImageData(0, 0, width, height);
+
+      let matchingPixels = 0;
+      const totalPixels = (width * height);
+      const stride = 4; // Skip some pixels for performance
+
+      for (let i = 0; i < capturedData.data.length; i += (4 * stride)) {
+        const capturedR = capturedData.data[i];
+        const capturedG = capturedData.data[i + 1];
+        const capturedB = capturedData.data[i + 2];
+        
+        const refR = referenceData.data[i];
+        const refG = referenceData.data[i + 1];
+        const refB = referenceData.data[i + 2];
+        
+        const colorDiff = Math.sqrt(
+          Math.pow(capturedR - refR, 2) +
+          Math.pow(capturedG - refG, 2) +
+          Math.pow(capturedB - refB, 2)
+        );
+        
+        if (colorDiff < 100) {
+          matchingPixels++;
+        }
       }
+
+      return (matchingPixels / (totalPixels / stride)) * 100;
+    } catch (error) {
+      console.error('Match calculation error:', error);
+      return 0;
     }
-    
-    return (matchingPixels / (totalPixels / 4)) * 100;
   }, []);
 
-  const detectCanvas = useCallback((imageData) => {
-    if (!referenceImageRef.current) return { detected: false };
+  const scanFrame = useCallback((context, canvasWidth, canvasHeight) => {
+    if (!referenceImageRef.current) return null;
 
-    const tempCanvas = document.createElement('canvas');
-    const tempCtx = tempCanvas.getContext('2d');
-    tempCanvas.width = imageData.width;
-    tempCanvas.height = imageData.height;
-    tempCtx.putImageData(imageData, 0, 0);
+    let bestMatch = {
+      percentage: 0,
+      position: null,
+      size: null
+    };
 
-    const match = calculateImageMatch(imageData, referenceImageRef.current);
-    setMatchPercentage(Math.round(match));
+    // Scan different sizes
+    for (let size = MIN_SCAN_SIZE; size <= MAX_SCAN_SIZE; size += SIZE_STEP) {
+      // Maintain aspect ratio
+      const refAspect = referenceImageRef.current.width / referenceImageRef.current.height;
+      const scanWidth = size;
+      const scanHeight = size / refAspect;
 
-    if (match >= 50) {
-      const centerX = imageData.width / 2;
-      const centerY = imageData.height / 2;
-      
-      const posX = (centerX / imageData.width) * 100;
-      const posY = (centerY / imageData.height) * 100;
-      
-      trackedPositionRef.current.x = trackedPositionRef.current.x * 0.8 + posX * 0.2;
-      trackedPositionRef.current.y = trackedPositionRef.current.y * 0.8 + posY * 0.2;
+      // Scan positions
+      for (let y = 0; y <= canvasHeight - scanHeight; y += SCAN_STEP) {
+        for (let x = 0; x <= canvasWidth - scanWidth; x += SCAN_STEP) {
+          const match = calculateImageMatch(
+            context,
+            x,
+            y,
+            scanWidth,
+            scanHeight,
+            referenceImageRef.current
+          );
 
-      return {
-        position: { x: trackedPositionRef.current.x, y: trackedPositionRef.current.y },
-        size: { width: imageData.width * 0.5, height: imageData.height * 0.5 },
-        detected: true
-      };
+          if (match > bestMatch.percentage) {
+            bestMatch = {
+              percentage: match,
+              position: { x, y },
+              size: { width: scanWidth, height: scanHeight }
+            };
+          }
+        }
+      }
     }
 
-    return { detected: false };
+    return bestMatch.percentage >= MATCHING_THRESHOLD ? bestMatch : null;
   }, [calculateImageMatch]);
 
   const startVideo = useCallback(async () => {
@@ -143,36 +168,34 @@ const App = () => {
       alpha: false 
     });
 
+    // Ensure canvas size matches video
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
     }
     
+    // Draw the current video frame
     context.drawImage(video, 0, 0);
     
-    const centerWidth = canvas.width * 0.5;
-    const centerHeight = canvas.height * 0.5;
-    const x = (canvas.width - centerWidth) / 2;
-    const y = (canvas.height - centerHeight) / 2;
+    // Scan for matches
+    const match = scanFrame(context, canvas.width, canvas.height);
     
-    const imageData = context.getImageData(x, y, centerWidth, centerHeight);
-    const result = detectCanvas(imageData);
-    
-    if (result.detected && matchPercentage >= 50) {
-      setCanvasPosition(result.position);
-      setCanvasSize(result.size);
+    if (match) {
+      setMatchPercentage(Math.round(match.percentage));
+      setBestMatch(match);
       
-      if (!isCanvasDetected) {
-        setIsCanvasDetected(true);
+      if (!isVideoPlaying) {
         startVideo();
       }
-    } else if (isCanvasDetected) {
-      setIsCanvasDetected(false);
+    } else {
+      setMatchPercentage(0);
+      setBestMatch(null);
     }
 
     animationFrameRef.current = requestAnimationFrame(processFrame);
-  }, [detectCanvas, startVideo, isCanvasDetected, matchPercentage]);
+  }, [scanFrame, startVideo, isVideoPlaying]);
 
+  // Load content effect
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -208,12 +231,12 @@ const App = () => {
         img.crossOrigin = 'anonymous';
         img.onload = () => {
           const canvas = document.createElement('canvas');
-          canvas.width = 300;
-          canvas.height = 300;
+          canvas.width = img.width;
+          canvas.height = img.height;
           const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0, 300, 300);
+          ctx.drawImage(img, 0, 0);
           referenceImageRef.current = canvas;
-          setDebugInfo('Content loaded - Please show image');
+          setDebugInfo('Content loaded - Scanning for image...');
         };
         img.src = data.imageUrl;
 
@@ -226,6 +249,7 @@ const App = () => {
     loadContent();
   }, [contentKey]);
 
+  // Camera setup effect
   useEffect(() => {
     let isComponentMounted = true;
     let currentStream = null;
@@ -258,7 +282,7 @@ const App = () => {
           await videoRef.current.play();
           
           if (isComponentMounted) {
-            setDebugInfo('Camera ready - Show image');
+            setDebugInfo('Camera ready - Scanning for image...');
             animationFrameRef.current = requestAnimationFrame(processFrame);
           }
         }
@@ -305,17 +329,17 @@ const App = () => {
       height: '100%',
       display: 'none'
     },
-    overlayVideo: {
+    overlayVideo: bestMatch ? {
       position: 'absolute',
-      top: `${canvasPosition.y}%`,
-      left: `${canvasPosition.x}%`,
-      transform: 'translate(-50%, -50%)',
-      width: `${Math.min(canvasSize.width * 1.2, 40)}vw`,
-      height: `${Math.min(canvasSize.height * 1.2, 40)}vh`,
-      objectFit: 'contain',
+      top: 0,
+      left: 0,
+      transform: `translate(${bestMatch.position.x}px, ${bestMatch.position.y}px)`,
+      width: `${bestMatch.size.width}px`,
+      height: `${bestMatch.size.height}px`,
+      objectFit: 'fill',
       zIndex: 20,
       transition: 'all 0.1s ease-out'
-    },
+    } : {},
     debugInfo: {
       position: 'absolute',
       top: 20,
@@ -345,7 +369,7 @@ const App = () => {
       position: 'absolute',
       top: 20,
       right: 20,
-      backgroundColor: matchPercentage >= 50 ? 'rgba(0,255,0,0.7)' : 'rgba(255,0,0,0.7)',
+      backgroundColor: matchPercentage >= MATCHING_THRESHOLD ? 'rgba(0,255,0,0.7)' : 'rgba(255,0,0,0.7)',
       color: 'white',
       padding: '10px',
       borderRadius: '5px',
@@ -368,7 +392,7 @@ const App = () => {
         style={styles.canvas}
       />
 
-      {videoUrl && isCanvasDetected && matchPercentage >= 50 && (
+      {bestMatch && matchPercentage >= MATCHING_THRESHOLD && (
         <video
           ref={overlayVideoRef}
           style={styles.overlayVideo}
@@ -384,7 +408,7 @@ const App = () => {
         <div>Status: {debugInfo}</div>
         <div>Key: {contentKey || 'Not found'}</div>
         <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
-        <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
+        <div>Scanning: Active</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
       </div>
 
