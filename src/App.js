@@ -1,7 +1,14 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
-
+import { 
+  getFirestore, 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  updateDoc,
+  increment 
+} from 'firebase/firestore';
 // Firebase Configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
@@ -24,9 +31,10 @@ class ImageMatcher {
     this.targetCtx = this.targetCanvas.getContext('2d', { willReadFrequently: true });
     this.searchCanvas = document.createElement('canvas');
     this.searchCtx = this.searchCanvas.getContext('2d', { willReadFrequently: true });
-    this.matchThreshold = 0.5; // Lowered threshold for testing
+    this.matchThreshold = 0.6;
     this.lastMatchTime = 0;
-    this.processEveryNthPixel = 2; // Process more pixels for accuracy
+    this.processEveryNthPixel = 1;
+    this.featurePoints = [];
   }
 
   async initialize(imageUrl) {
@@ -37,25 +45,23 @@ class ImageMatcher {
 
       return new Promise((resolve, reject) => {
         img.onload = () => {
-          // Use original image size for better matching
-          const maxSize = 400; // Increased max size
+          const maxSize = 300;
           let width = img.width;
           let height = img.height;
 
-          if (width > maxSize) {
-            height = (height * maxSize) / width;
+          const aspectRatio = width / height;
+          if (width > height) {
             width = maxSize;
-          }
-          if (height > maxSize) {
-            width = (width * maxSize) / height;
+            height = maxSize / aspectRatio;
+          } else {
             height = maxSize;
+            width = maxSize * aspectRatio;
           }
 
           this.targetCanvas.width = width;
           this.targetCanvas.height = height;
           this.targetCtx.drawImage(img, 0, 0, width, height);
           
-          // Store the processed image data
           const imageData = this.targetCtx.getImageData(0, 0, width, height);
           this.targetImage = {
             data: imageData.data,
@@ -63,6 +69,7 @@ class ImageMatcher {
             height: height
           };
           
+          this.extractFeaturePoints(imageData);
           console.log('Target image processed:', width, 'x', height);
           resolve(true);
         };
@@ -80,66 +87,91 @@ class ImageMatcher {
     }
   }
 
+  extractFeaturePoints(imageData) {
+    const { data, width, height } = imageData;
+    this.featurePoints = [];
+    
+    const gridSize = 20;
+    for (let y = 0; y < height; y += gridSize) {
+      for (let x = 0; x < width; x += gridSize) {
+        const idx = (y * width + x) * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        
+        const gx = this.getGradientX(data, x, y, width);
+        const gy = this.getGradientY(data, x, y, width, height);
+        const gradient = Math.sqrt(gx * gx + gy * gy);
+        
+        if (gradient > 50) {
+          this.featurePoints.push({
+            x, y,
+            color: [r, g, b],
+            gradient
+          });
+        }
+      }
+    }
+  }
+
+  getGradientX(data, x, y, width) {
+    const idx = (y * width + x) * 4;
+    const left = x > 0 ? (y * width + (x - 1)) * 4 : idx;
+    const right = x < width - 1 ? (y * width + (x + 1)) * 4 : idx;
+    
+    return (
+      (data[right] - data[left]) +
+      (data[right + 1] - data[left + 1]) +
+      (data[right + 2] - data[left + 2])
+    ) / 3;
+  }
+
+  getGradientY(data, x, y, width, height) {
+    const idx = (y * width + x) * 4;
+    const up = y > 0 ? ((y - 1) * width + x) * 4 : idx;
+    const down = y < height - 1 ? ((y + 1) * width + x) * 4 : idx;
+    
+    return (
+      (data[down] - data[up]) +
+      (data[down + 1] - data[up + 1]) +
+      (data[down + 2] - data[up + 2])
+    ) / 3;
+  }
+
   matchFrame(frame) {
-    if (!this.targetImage) {
-      console.log('No target image loaded');
+    if (!this.targetImage || !this.featurePoints.length) {
       return { matched: false };
     }
 
-    // Throttle processing
     const now = Date.now();
-    if (now - this.lastMatchTime < 100) { // Increased interval for better performance
+    if (now - this.lastMatchTime < 100) {
       return { matched: false };
     }
     this.lastMatchTime = now;
 
-    // Get frame dimensions
     const { width: frameWidth, height: frameHeight, data: frameData } = frame;
-
-    // Scales to try
     const scales = [0.5, 0.75, 1, 1.25, 1.5];
     let bestMatch = { score: 0, x: 0, y: 0, scale: 1 };
 
-    // Process frame at different scales
     for (const scale of scales) {
       const searchWidth = Math.floor(this.targetImage.width * scale);
       const searchHeight = Math.floor(this.targetImage.height * scale);
 
       if (searchWidth > frameWidth || searchHeight > frameHeight) continue;
 
-      // Search with larger steps for performance
-      const stepSize = Math.max(20, Math.floor(searchWidth * 0.2));
-
+      const stepSize = Math.max(10, Math.floor(searchWidth * 0.1));
       for (let y = 0; y <= frameHeight - searchHeight; y += stepSize) {
         for (let x = 0; x <= frameWidth - searchWidth; x += stepSize) {
-          // Draw the region to compare
-          this.searchCtx.clearRect(0, 0, this.searchCanvas.width, this.searchCanvas.height);
-          this.searchCanvas.width = searchWidth;
-          this.searchCanvas.height = searchHeight;
-          
-          // Extract region from frame
-          const frameImageData = new ImageData(
-            new Uint8ClampedArray(frameData.buffer),
-            frameWidth,
-            frameHeight
-          );
-          
-          this.searchCtx.putImageData(frameImageData, -x, -y);
-          const regionImageData = this.searchCtx.getImageData(0, 0, searchWidth, searchHeight);
-          
-          // Compare the regions
-          const score = this.compareRegions(regionImageData, scale);
+          const score = this.compareRegionFeatures(frameData, frameWidth, x, y, scale);
           
           if (score > bestMatch.score) {
             bestMatch = { score, x, y, width: searchWidth, height: searchHeight, scale };
-            console.log(`New best match: ${score.toFixed(2)} at (${x}, ${y}) scale ${scale}`);
           }
         }
       }
     }
 
     if (bestMatch.score > this.matchThreshold) {
-      console.log(`Match found! Score: ${bestMatch.score.toFixed(2)}`);
       return {
         matched: true,
         position: {
@@ -157,36 +189,34 @@ class ImageMatcher {
     return { matched: false };
   }
 
-  compareRegions(regionImageData, scale) {
-    // Simple color-based comparison
-    const targetData = this.targetImage.data;
-    const regionData = regionImageData.data;
+  compareRegionFeatures(frameData, frameWidth, offsetX, offsetY, scale) {
     let matches = 0;
-    let total = 0;
-
-    for (let i = 0; i < regionData.length; i += 4 * this.processEveryNthPixel) {
-      const targetR = targetData[i];
-      const targetG = targetData[i + 1];
-      const targetB = targetData[i + 2];
-
-      const regionR = regionData[i];
-      const regionG = regionData[i + 1];
-      const regionB = regionData[i + 2];
-
-      // Calculate color difference
-      const diff = Math.sqrt(
-        Math.pow(targetR - regionR, 2) +
-        Math.pow(targetG - regionG, 2) +
-        Math.pow(targetB - regionB, 2)
-      );
-
-      if (diff < 50) { // More lenient color matching
+    let total = this.featurePoints.length;
+    
+    for (const point of this.featurePoints) {
+      const scaledX = Math.floor(point.x * scale) + offsetX;
+      const scaledY = Math.floor(point.y * scale) + offsetY;
+      
+      const idx = (scaledY * frameWidth + scaledX) * 4;
+      const frameColor = [
+        frameData[idx],
+        frameData[idx + 1],
+        frameData[idx + 2]
+      ];
+      
+      if (this.compareColors(point.color, frameColor)) {
         matches++;
       }
-      total++;
     }
-
+    
     return matches / total;
+  }
+
+  compareColors(color1, color2) {
+    const threshold = 30;
+    return Math.abs(color1[0] - color2[0]) < threshold &&
+           Math.abs(color1[1] - color2[1]) < threshold &&
+           Math.abs(color1[2] - color2[2]) < threshold;
   }
 }
 
@@ -197,6 +227,7 @@ const App = () => {
   const overlayVideoRef = useRef(null);
   const animationFrameRef = useRef(null);
   const matcher = useRef(null);
+  const docRef = useRef(null);
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
@@ -206,7 +237,9 @@ const App = () => {
   const [canvasSize, setCanvasSize] = useState({ width: 40, height: 40 });
   const [matchConfidence, setMatchConfidence] = useState(0);
   const [isMarkerDetected, setIsMarkerDetected] = useState(false);
+  const [lastViewUpdate, setLastViewUpdate] = useState(0);
 
+  // Initialize content and matcher
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -229,8 +262,10 @@ const App = () => {
           return;
         }
 
-        const data = snapshot.docs[0].data();
-        console.log('Content loaded:', data);
+        const doc = snapshot.docs[0];
+        docRef.current = doc.ref;
+        const data = doc.data();
+        
         setVideoUrl(data.videoUrl);
         setImageUrl(data.imageUrl);
         
@@ -238,13 +273,13 @@ const App = () => {
         const initialized = await matcher.current.initialize(data.imageUrl);
         
         if (initialized) {
-          setDebugInfo('Matcher initialized - Show marker image');
+          setDebugInfo('Ready - Show marker image');
         } else {
           setDebugInfo('Failed to initialize matcher');
         }
       } catch (error) {
         console.error('Content loading error:', error);
-        setDebugInfo(`Error loading content: ${error.message}`);
+        setDebugInfo(`Error: ${error.message}`);
       }
     };
 
@@ -257,6 +292,7 @@ const App = () => {
     };
   }, [contentKey]);
 
+  // Handle video playback
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
@@ -266,6 +302,21 @@ const App = () => {
       await overlayVideoRef.current.play();
       setIsVideoPlaying(true);
       setDebugInfo('Video playing');
+
+      // Update view count
+      if (docRef.current) {
+        const now = Date.now();
+        if (now - lastViewUpdate > 60000) { // Update once per minute
+          try {
+            await updateDoc(docRef.current, {
+              views: increment(1)
+            });
+            setLastViewUpdate(now);
+          } catch (error) {
+            console.error('Error updating view count:', error);
+          }
+        }
+      }
     } catch (error) {
       console.error('Video playback error:', error);
       setDebugInfo('Tap to play video');
@@ -283,8 +334,9 @@ const App = () => {
       
       document.addEventListener('click', playOnTap);
     }
-  }, [videoUrl, isVideoPlaying]);
+  }, [videoUrl, isVideoPlaying, lastViewUpdate]);
 
+  // Process video frames
   const processFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -296,17 +348,14 @@ const App = () => {
 
     const context = canvas.getContext('2d', { willReadFrequently: true });
     
-    // Ensure canvas size matches video
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
     }
 
-    // Draw the current video frame
     context.drawImage(video, 0, 0);
     const frame = context.getImageData(0, 0, canvas.width, canvas.height);
     
-    // Process the frame
     const result = matcher.current.matchFrame(frame);
     if (result.matched) {
       setIsMarkerDetected(true);
@@ -325,6 +374,7 @@ const App = () => {
     animationFrameRef.current = requestAnimationFrame(processFrame);
   }, [startVideo, isVideoPlaying]);
 
+  // Initialize camera
   useEffect(() => {
     let stream = null;
 
@@ -382,7 +432,7 @@ const App = () => {
       left: 0,
       width: '100%',
       height: '100%',
-      opacity: 0.5 // Make canvas visible for debugging
+      opacity: 0.5
     },
     overlayVideo: {
       position: 'absolute',
@@ -393,7 +443,8 @@ const App = () => {
       height: `${canvasSize.height}vh`,
       objectFit: 'contain',
       zIndex: 20,
-      transition: 'all 0.1s ease-out'
+      transition: 'all 0.1s ease-out',
+      display: isMarkerDetected ? 'block' : 'none'
     },
     debugInfo: {
       position: 'absolute',
@@ -404,7 +455,8 @@ const App = () => {
       padding: '10px',
       borderRadius: '5px',
       zIndex: 30,
-      fontSize: '14px'
+      fontSize: '14px',
+      fontFamily: 'monospace'
     },
     markerIndicator: {
       position: 'absolute',
@@ -425,12 +477,27 @@ const App = () => {
       width: '100px',
       height: 'auto',
       zIndex: 30,
-      border: '2px solid white'
+      border: '2px solid white',
+      borderRadius: '5px',
+      opacity: 0.8
+    },
+    performanceStats: {
+      position: 'absolute',
+      bottom: 20,
+      left: 20,
+      backgroundColor: 'rgba(0,0,0,0.7)',
+      color: 'white',
+      padding: '10px',
+      borderRadius: '5px',
+      zIndex: 30,
+      fontSize: '12px',
+      fontFamily: 'monospace'
     }
   };
 
   return (
     <div style={styles.container}>
+      {/* Camera Feed */}
       <video
         ref={videoRef}
         autoPlay
@@ -439,11 +506,13 @@ const App = () => {
         style={styles.video}
       />
       
+      {/* Processing Canvas */}
       <canvas
         ref={canvasRef}
-style={styles.canvas}
+        style={styles.canvas}
       />
 
+      {/* AR Video Overlay */}
       {videoUrl && (
         <video
           ref={overlayVideoRef}
@@ -456,6 +525,7 @@ style={styles.canvas}
         />
       )}
 
+      {/* Target Image Preview */}
       {imageUrl && (
         <img
           src={imageUrl}
@@ -464,16 +534,23 @@ style={styles.canvas}
         />
       )}
 
+      {/* Debug Information */}
       <div style={styles.debugInfo}>
         <div>Status: {debugInfo}</div>
-        <div>Match Confidence: {(matchConfidence * 100).toFixed(1)}%</div>
-        <div>Marker Detected: {isMarkerDetected ? 'Yes' : 'No'}</div>
-        {imageUrl && <div>Target Image: Loaded</div>}
-        {videoUrl && <div>Video: {isVideoPlaying ? 'Playing' : 'Ready'}</div>}
+        <div>Confidence: {(matchConfidence * 100).toFixed(1)}%</div>
+        <div>Position: {Math.round(canvasPosition.x)}%, {Math.round(canvasPosition.y)}%</div>
+        <div>Size: {Math.round(canvasSize.width)}%, {Math.round(canvasSize.height)}%</div>
       </div>
 
+      {/* Marker Detection Indicator */}
       <div style={styles.markerIndicator}>
         {isMarkerDetected ? 'Marker Detected' : 'Scanning...'}
+      </div>
+
+      {/* Performance Stats */}
+      <div style={styles.performanceStats}>
+        <div>FPS: {Math.round(1000 / (Date.now() - lastViewUpdate))}</div>
+        <div>Resolution: {videoRef.current?.videoWidth || 0}x{videoRef.current?.videoHeight || 0}</div>
       </div>
     </div>
   );
