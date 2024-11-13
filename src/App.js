@@ -18,73 +18,74 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-class ImageMatcher {
+class SimpleMatcher {
   constructor() {
-    this.templateImageData = null;
-    this.templateWidth = 0;
-    this.templateHeight = 0;
+    this.targetImage = null;
+    this.canvas = document.createElement('canvas');
+    this.ctx = this.canvas.getContext('2d');
+    this.matchThreshold = 0.45;
   }
 
   async initialize(imageUrl) {
-    try {
-      const response = await fetch(imageUrl);
-      const blob = await response.blob();
-      const img = await createImageBitmap(blob);
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
       
-      // Create a canvas to process the template image
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      
-      this.templateImageData = ctx.getImageData(0, 0, img.width, img.height);
-      this.templateWidth = img.width;
-      this.templateHeight = img.height;
-      
-      console.log('Template initialized:', img.width, 'x', img.height);
-      return true;
-    } catch (error) {
-      console.error('Template initialization failed:', error);
-      return false;
-    }
+      img.onload = () => {
+        // Standardize size
+        const maxSize = 200;
+        let width = img.width;
+        let height = img.height;
+        
+        if (width > height && width > maxSize) {
+          height = (height * maxSize) / width;
+          width = maxSize;
+        } else if (height > maxSize) {
+          width = (width * maxSize) / height;
+          height = maxSize;
+        }
+
+        this.canvas.width = width;
+        this.canvas.height = height;
+        this.ctx.drawImage(img, 0, 0, width, height);
+        this.targetImage = this.ctx.getImageData(0, 0, width, height);
+        console.log('Target initialized:', width, 'x', height);
+        resolve(true);
+      };
+
+      img.onerror = () => {
+        console.error('Image load failed');
+        reject(new Error('Image load failed'));
+      };
+
+      img.src = imageUrl;
+    });
   }
 
-  findMatches(frameImageData) {
-    const { width: frameWidth, height: frameHeight } = frameImageData;
-    const stepSize = 16; // Scan step size
+  matchFrame(currentFrame) {
+    if (!this.targetImage) return { matched: false };
+
+    // Process frame at different scales
     const scales = [0.5, 0.75, 1, 1.25, 1.5];
     let bestMatch = { score: 0, x: 0, y: 0, scale: 1 };
 
     for (const scale of scales) {
-      const searchWidth = Math.floor(this.templateWidth * scale);
-      const searchHeight = Math.floor(this.templateHeight * scale);
-
-      // Skip if scaled template is larger than frame
-      if (searchWidth > frameWidth || searchHeight > frameHeight) continue;
-
-      for (let y = 0; y < frameHeight - searchHeight; y += stepSize) {
-        for (let x = 0; x < frameWidth - searchWidth; x += stepSize) {
-          const score = this.compareRegion(frameImageData, x, y, searchWidth, searchHeight);
-          
-          if (score > bestMatch.score) {
-            bestMatch = { score, x, y, scale, width: searchWidth, height: searchHeight };
-          }
-        }
+      const result = this.searchAtScale(currentFrame, scale);
+      if (result.score > bestMatch.score) {
+        bestMatch = result;
       }
     }
 
-    // Return match if score is above threshold
-    if (bestMatch.score > 0.5) {
+    if (bestMatch.score > this.matchThreshold) {
       return {
         matched: true,
         position: {
-          x: (bestMatch.x + bestMatch.width/2) / frameWidth * 100,
-          y: (bestMatch.y + bestMatch.height/2) / frameHeight * 100
+          x: (bestMatch.x + (bestMatch.width / 2)) / currentFrame.width * 100,
+          y: (bestMatch.y + (bestMatch.height / 2)) / currentFrame.height * 100
         },
         size: {
-          width: (bestMatch.width / frameWidth) * 100,
-          height: (bestMatch.height / frameHeight) * 100
+          width: (bestMatch.width / currentFrame.width) * 100,
+          height: (bestMatch.height / currentFrame.height) * 100
         },
         confidence: bestMatch.score
       };
@@ -93,34 +94,77 @@ class ImageMatcher {
     return { matched: false };
   }
 
-  compareRegion(frameImageData, startX, startY, width, height) {
-    const { data: frameData } = frameImageData;
-    const { data: templateData } = this.templateImageData;
-    const frameWidth = frameImageData.width;
-    let totalDiff = 0;
-    let samples = 0;
+  searchAtScale(frame, scale) {
+    const searchWidth = Math.floor(this.targetImage.width * scale);
+    const searchHeight = Math.floor(this.targetImage.height * scale);
 
-    // Compare downsampled regions for speed
-    const sampleStep = 4;
-    
-    for (let y = 0; y < height; y += sampleStep) {
-      for (let x = 0; x < width; x += sampleStep) {
-        const frameIdx = ((startY + y) * frameWidth + (startX + x)) * 4;
-        const templateIdx = (Math.floor(y * this.templateHeight / height) * this.templateWidth + 
-                           Math.floor(x * this.templateWidth / width)) * 4;
+    if (searchWidth > frame.width || searchHeight > frame.height) {
+      return { score: 0 };
+    }
 
-        // Compare RGB values
-        const rDiff = Math.abs(frameData[frameIdx] - templateData[templateIdx]);
-        const gDiff = Math.abs(frameData[frameIdx + 1] - templateData[templateIdx + 1]);
-        const bDiff = Math.abs(frameData[frameIdx + 2] - templateData[templateIdx + 2]);
-        
-        totalDiff += (rDiff + gDiff + bDiff) / 3;
-        samples++;
+    const stepSize = Math.max(20, Math.floor(searchWidth * 0.2));
+    let bestMatch = { score: 0 };
+
+    for (let y = 0; y <= frame.height - searchHeight; y += stepSize) {
+      for (let x = 0; x <= frame.width - searchWidth; x += stepSize) {
+        const score = this.compareRegions(frame, x, y, searchWidth, searchHeight);
+        if (score > bestMatch.score) {
+          bestMatch = { score, x, y, width: searchWidth, height: searchHeight, scale };
+        }
       }
     }
 
-    // Convert difference to similarity score (0-1)
-    return 1 - (totalDiff / (samples * 255));
+    return bestMatch;
+  }
+
+  compareRegions(frame, startX, startY, width, height) {
+    // Prepare comparison canvas
+    this.canvas.width = this.targetImage.width;
+    this.canvas.height = this.targetImage.height;
+
+    // Draw and scale the region
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = width;
+    tempCanvas.height = height;
+    const tempCtx = tempCanvas.getContext('2d');
+    tempCtx.putImageData(
+      frame,
+      -startX,
+      -startY,
+      startX,
+      startY,
+      width,
+      height
+    );
+
+    this.ctx.drawImage(
+      tempCanvas,
+      0, 0, width, height,
+      0, 0, this.targetImage.width, this.targetImage.height
+    );
+
+    const regionData = this.ctx.getImageData(
+      0, 0,
+      this.targetImage.width,
+      this.targetImage.height
+    );
+
+    return this.calculateSimilarity(this.targetImage, regionData);
+  }
+
+  calculateSimilarity(img1, img2) {
+    const data1 = img1.data;
+    const data2 = img2.data;
+    let diff = 0;
+    const sampleStep = 4;
+
+    for (let i = 0; i < data1.length; i += 4 * sampleStep) {
+      diff += Math.abs(data1[i] - data2[i]);
+      diff += Math.abs(data1[i + 1] - data2[i + 1]);
+      diff += Math.abs(data1[i + 2] - data2[i + 2]);
+    }
+
+    return 1 - (diff / (data1.length / sampleStep) / 765); // 765 = 255 * 3
   }
 }
 
@@ -130,7 +174,7 @@ const App = () => {
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const animationFrameRef = useRef(null);
-  const imageMatcher = useRef(new ImageMatcher());
+  const matcher = useRef(new SimpleMatcher());
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
@@ -148,7 +192,6 @@ const App = () => {
       }
 
       try {
-        setDebugInfo('Loading content...');
         const arContentRef = collection(db, 'arContent');
         const q = query(
           arContentRef,
@@ -163,18 +206,15 @@ const App = () => {
         }
 
         const data = snapshot.docs[0].data();
-        console.log('Content loaded:', data);
         setVideoUrl(data.videoUrl);
         
-        const initialized = await imageMatcher.current.initialize(data.imageUrl);
+        const initialized = await matcher.current.initialize(data.imageUrl);
         if (initialized) {
-          setDebugInfo('Ready - Show image marker');
-        } else {
-          setDebugInfo('Failed to initialize matcher');
+          setDebugInfo('Ready - Show marker image');
         }
       } catch (error) {
         console.error('Content loading error:', error);
-        setDebugInfo(`Error: ${error.message}`);
+        setDebugInfo('Error loading content');
       }
     };
 
@@ -191,8 +231,7 @@ const App = () => {
       setIsVideoPlaying(true);
       setDebugInfo('Video playing');
     } catch (error) {
-      console.error('Video playback error:', error);
-      setDebugInfo('Tap screen for sound');
+      setDebugInfo('Tap to play video');
       
       const playOnTap = async () => {
         try {
@@ -218,7 +257,7 @@ const App = () => {
       return;
     }
 
-    const context = canvas.getContext('2d', { willReadFrequently: true });
+    const context = canvas.getContext('2d');
     
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
@@ -226,9 +265,9 @@ const App = () => {
     }
 
     context.drawImage(video, 0, 0);
-    const currentFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+    const frame = context.getImageData(0, 0, canvas.width, canvas.height);
     
-    const result = imageMatcher.current.findMatches(currentFrame);
+    const result = matcher.current.matchFrame(frame);
     if (result.matched) {
       setIsMarkerDetected(true);
       setMatchConfidence(result.confidence);
@@ -267,7 +306,7 @@ const App = () => {
         }
       } catch (error) {
         console.error('Camera error:', error);
-        setDebugInfo(`Camera error: ${error.message}`);
+        setDebugInfo('Camera access denied');
       }
     };
 
@@ -370,7 +409,6 @@ const App = () => {
 
       <div style={styles.debugInfo}>
         <div>Status: {debugInfo}</div>
-        <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
         <div>Match Confidence: {(matchConfidence * 100).toFixed(1)}%</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
       </div>
