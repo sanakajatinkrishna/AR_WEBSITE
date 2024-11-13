@@ -18,6 +18,7 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const App = () => {
+  // Rest of the component code remains exactly the same, just removed unused imports and storage initialization
   const contentKey = new URLSearchParams(window.location.search).get('key');
   
   const videoRef = useRef(null);
@@ -26,6 +27,7 @@ const App = () => {
   const referenceImageRef = useRef(null);
   const referenceCanvasRef = useRef(null);
   const animationFrameRef = useRef(null);
+  const debugCanvasRef = useRef(null);
   
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
@@ -33,6 +35,7 @@ const App = () => {
   const [imageUrl, setImageUrl] = useState(null);
   const [isMatched, setIsMatched] = useState(false);
   const [matchConfidence, setMatchConfidence] = useState(0);
+  const [imageLoaded, setImageLoaded] = useState(false);
 
   // Start video playback
   const startVideo = useCallback(async () => {
@@ -43,74 +46,89 @@ const App = () => {
       overlayVideoRef.current.muted = false;
       await overlayVideoRef.current.play();
       setIsVideoPlaying(true);
+      setDebugInfo('Video playing - Tracking active');
     } catch (error) {
       console.error('Video playback error:', error);
-      setDebugInfo('Click to play video with sound');
+      const playOnClick = async () => {
+        try {
+          await overlayVideoRef.current.play();
+          setIsVideoPlaying(true);
+          setDebugInfo('Video playing - Tracking active');
+          document.removeEventListener('click', playOnClick);
+        } catch (err) {
+          console.error('Play on click failed:', err);
+        }
+      };
+      document.addEventListener('click', playOnClick);
+      setDebugInfo('Click screen to start video with sound');
     }
   }, [videoUrl, isVideoPlaying]);
 
-  // Image matching helper functions
-  const calculateHistogram = (imageData) => {
-    const hist = Array(256).fill(0);
-    for (let i = 0; i < imageData.length; i += 4) {
-      const brightness = Math.floor((imageData[i] + imageData[i + 1] + imageData[i + 2]) / 3);
-      hist[brightness]++;
-    }
-    return hist;
-  };
-
-  const compareHistograms = (hist1, hist2) => {
-    let difference = 0;
-    const total = hist1.reduce((a, b) => a + b, 0);
-    
-    for (let i = 0; i < 256; i++) {
-      const h1 = hist1[i] / total;
-      const h2 = hist2[i] / total;
-      difference += Math.abs(h1 - h2);
-    }
-    
-    return difference / 2;
-  };
-
-  // Image comparison function
+  // Enhanced image comparison function
   const compareImages = useCallback((sourceImageData, targetImageData) => {
     const sourceData = sourceImageData.data;
     const targetData = targetImageData.data;
+    const debugCtx = debugCanvasRef.current?.getContext('2d');
     
-    // Calculate average colors for both images
-    let sourceTotals = [0, 0, 0];
-    let targetTotals = [0, 0, 0];
+    // Initialize feature points
+    let matchingPoints = 0;
+    let totalPoints = 0;
     
-    for (let i = 0; i < sourceData.length; i += 4) {
-      sourceTotals[0] += sourceData[i];
-      sourceTotals[1] += sourceData[i + 1];
-      sourceTotals[2] += sourceData[i + 2];
-      
-      targetTotals[0] += targetData[i];
-      targetTotals[1] += targetData[i + 1];
-      targetTotals[2] += targetData[i + 2];
+    // Sample points in a grid
+    const gridSize = 10;
+    const stepX = Math.floor(sourceImageData.width / gridSize);
+    const stepY = Math.floor(sourceImageData.height / gridSize);
+
+    if (debugCtx) {
+      debugCtx.clearRect(0, 0, debugCanvasRef.current.width, debugCanvasRef.current.height);
+    }
+
+    // Compare color values at grid points
+    for (let y = 0; y < sourceImageData.height; y += stepY) {
+      for (let x = 0; x < sourceImageData.width; x += stepX) {
+        const i = (y * sourceImageData.width + x) * 4;
+        
+        // Get RGB values for both images
+        const sourceColor = {
+          r: sourceData[i],
+          g: sourceData[i + 1],
+          b: sourceData[i + 2]
+        };
+        
+        const targetColor = {
+          r: targetData[i],
+          g: targetData[i + 1],
+          b: targetData[i + 2]
+        };
+        
+        // Calculate color difference
+        const colorDiff = Math.sqrt(
+          Math.pow(sourceColor.r - targetColor.r, 2) +
+          Math.pow(sourceColor.g - targetColor.g, 2) +
+          Math.pow(sourceColor.b - targetColor.b, 2)
+        );
+        
+        // Threshold for matching points
+        const threshold = 50;
+        if (colorDiff < threshold) {
+          matchingPoints++;
+          if (debugCtx) {
+            debugCtx.fillStyle = 'rgba(0, 255, 0, 0.5)';
+            debugCtx.fillRect(x, y, 5, 5);
+          }
+        } else {
+          if (debugCtx) {
+            debugCtx.fillStyle = 'rgba(255, 0, 0, 0.2)';
+            debugCtx.fillRect(x, y, 5, 5);
+          }
+        }
+        totalPoints++;
+      }
     }
     
-    const pixelCount = sourceData.length / 4;
-    const sourceAvg = sourceTotals.map(total => total / pixelCount);
-    const targetAvg = targetTotals.map(total => total / pixelCount);
-    
-    // Calculate color difference
-    let difference = 0;
-    for (let i = 0; i < 3; i++) {
-      difference += Math.abs(sourceAvg[i] - targetAvg[i]);
-    }
-    
-    // Calculate histogram difference
-    const sourceHist = calculateHistogram(sourceData);
-    const targetHist = calculateHistogram(targetData);
-    const histDiff = compareHistograms(sourceHist, targetHist);
-    
-    // Combined confidence score (0-100)
-    const colorConfidence = Math.max(0, 100 - (difference / 7.65));
-    const histConfidence = Math.max(0, 100 - (histDiff * 100));
-    
-    return (colorConfidence * 0.4 + histConfidence * 0.6);
+    // Calculate confidence score
+    const confidence = (matchingPoints / totalPoints) * 100;
+    return confidence;
   }, []);
 
   // Process video frames
@@ -118,6 +136,7 @@ const App = () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const refCanvas = referenceCanvasRef.current;
+    const debugCanvas = debugCanvasRef.current;
 
     if (!video || !canvas || !refCanvas || !referenceImageRef.current) {
       animationFrameRef.current = requestAnimationFrame(processFrame);
@@ -126,11 +145,17 @@ const App = () => {
 
     const context = canvas.getContext('2d', { willReadFrequently: true });
     
+    // Update canvas dimensions if needed
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
+      if (debugCanvas) {
+        debugCanvas.width = video.videoWidth;
+        debugCanvas.height = video.videoHeight;
+      }
     }
     
+    // Draw current frame
     context.drawImage(video, 0, 0);
     
     // Get center portion of camera feed
@@ -139,26 +164,30 @@ const App = () => {
     const x = (canvas.width - centerWidth) / 2;
     const y = (canvas.height - centerHeight) / 2;
     
+    // Get image data for comparison
     const cameraData = context.getImageData(x, y, centerWidth, centerHeight);
     const referenceData = refCanvas.getContext('2d').getImageData(
       0, 0, refCanvas.width, refCanvas.height
     );
     
+    // Compare images and get confidence score
     const confidence = compareImages(cameraData, referenceData);
     setMatchConfidence(confidence);
     
-    // Update match status and play video if confidence is high enough
-    if (confidence > 50 && !isMatched) {
+    // Update match status and handle video
+    if (confidence > 60 && !isMatched) {
       setIsMatched(true);
       startVideo();
+      setDebugInfo(`Match found! Confidence: ${confidence.toFixed(1)}%`);
     } else if (confidence < 40 && isMatched) {
       setIsMatched(false);
       if (overlayVideoRef.current) {
         overlayVideoRef.current.pause();
+        setIsVideoPlaying(false);
       }
+      setDebugInfo('Match lost - Show image again');
     }
 
-    setDebugInfo(`Match confidence: ${confidence.toFixed(1)}%`);
     animationFrameRef.current = requestAnimationFrame(processFrame);
   }, [compareImages, isMatched, startVideo]);
 
@@ -171,8 +200,8 @@ const App = () => {
       }
 
       try {
-        console.log('Loading content for key:', contentKey);
         setDebugInfo('Loading content...');
+        console.log('Loading content for key:', contentKey);
 
         const arContentRef = collection(db, 'arContent');
         const q = query(
@@ -191,14 +220,15 @@ const App = () => {
         const doc = snapshot.docs[0];
         const data = doc.data();
         
+        // Load video URL
         setVideoUrl(data.videoUrl);
-        setImageUrl(data.imageUrl);
-        setDebugInfo('Content loaded - Please show image');
-
-        // Load reference image
+        
+        // Load and prepare reference image
         const img = new Image();
         img.crossOrigin = 'Anonymous';
         img.src = data.imageUrl;
+        setImageUrl(data.imageUrl);
+        
         img.onload = () => {
           referenceImageRef.current = img;
           const canvas = referenceCanvasRef.current;
@@ -206,6 +236,9 @@ const App = () => {
           canvas.width = img.width;
           canvas.height = img.height;
           ctx.drawImage(img, 0, 0);
+          setImageLoaded(true);
+          setDebugInfo('Reference image loaded - Ready to track');
+          console.log('Reference image loaded:', img.width, 'x', img.height);
         };
 
       } catch (error) {
@@ -234,6 +267,7 @@ const App = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
+          setDebugInfo('Camera started - Loading reference image');
           animationFrameRef.current = requestAnimationFrame(processFrame);
         }
       } catch (error) {
@@ -276,6 +310,11 @@ const App = () => {
         className="hidden"
       />
 
+      <canvas
+        ref={debugCanvasRef}
+        className="absolute top-0 left-0 w-full h-full pointer-events-none opacity-50"
+      />
+
       {videoUrl && (
         <video
           ref={overlayVideoRef}
@@ -292,6 +331,8 @@ const App = () => {
 
       <div className="absolute top-5 left-5 bg-black/70 text-white p-3 rounded-lg">
         <div>Status: {debugInfo}</div>
+        <div>Image Loaded: {imageLoaded ? 'Yes' : 'No'}</div>
+        <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
         <div>Match: {isMatched ? 'Yes' : 'No'}</div>
         <div>Confidence: {matchConfidence.toFixed(1)}%</div>
       </div>
