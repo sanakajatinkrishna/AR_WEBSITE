@@ -23,6 +23,12 @@ class ImageMatcher {
     this.referenceImage = null;
     this.referenceFeatures = null;
     this.matchThreshold = 0.65;
+    this.minMatches = 6;
+    this.lastMatchPosition = null;
+    this.smoothingFactor = 0.7;
+    this.scales = [0.5, 0.75, 1.0, 1.25, 1.5];
+    this.gridSize = 10;
+    this.maxFeatures = 200;
   }
 
   async initialize(imageUrl) {
@@ -39,6 +45,7 @@ class ImageMatcher {
       
       this.referenceImage = ctx.getImageData(0, 0, img.width, img.height);
       this.referenceFeatures = this.extractFeatures(this.referenceImage);
+      console.log('Reference features extracted:', this.referenceFeatures.length);
       return true;
     } catch (error) {
       console.error('Reference image initialization failed:', error);
@@ -49,47 +56,77 @@ class ImageMatcher {
   extractFeatures(imageData) {
     const features = [];
     const { width, height, data } = imageData;
-    const cellSize = 20; // Grid cell size for feature extraction
 
-    for (let y = cellSize; y < height - cellSize; y += cellSize) {
-      for (let x = cellSize; x < width - cellSize; x += cellSize) {
-        const descriptor = this.computeLocalDescriptor(data, width, x, y, cellSize);
+    for (let y = this.gridSize; y < height - this.gridSize; y += this.gridSize) {
+      for (let x = this.gridSize; x < width - this.gridSize; x += this.gridSize) {
+        const descriptor = this.computeDescriptor(data, width, x, y);
         if (descriptor) {
-          features.push({ x, y, descriptor });
+          features.push({
+            x,
+            y,
+            descriptor,
+            strength: this.computeFeatureStrength(data, width, x, y)
+          });
         }
       }
     }
-    return features;
+
+    // Sort by strength and keep top features
+    features.sort((a, b) => b.strength - a.strength);
+    return features.slice(0, this.maxFeatures);
   }
 
-  computeLocalDescriptor(data, width, centerX, centerY, cellSize) {
-    const descriptor = new Float32Array(64);
-    let descriptorIndex = 0;
-    let hasSignificantFeature = false;
+  computeDescriptor(data, width, centerX, centerY) {
+    const descriptor = new Float32Array(128);
+    let idx = 0;
+    let hasSignificantGradient = false;
 
-    for (let dy = -cellSize/2; dy <= cellSize/2; dy += cellSize/4) {
-      for (let dx = -cellSize/2; dx <= cellSize/2; dx += cellSize/4) {
+    for (let dy = -this.gridSize; dy <= this.gridSize; dy += 4) {
+      for (let dx = -this.gridSize; dx <= this.gridSize; dx += 4) {
         const x = centerX + dx;
         const y = centerY + dy;
-        const idx = (y * width + x) * 4;
-
-        // Compute gradients
-        const dx1 = data[idx + 4] - data[idx - 4];
-        const dy1 = data[idx + width * 4] - data[idx - width * 4];
         
-        const gradient = Math.sqrt(dx1 * dx1 + dy1 * dy1);
-        const orientation = Math.atan2(dy1, dx1);
+        const gradX = this.getGradientX(data, width, x, y);
+        const gradY = this.getGradientY(data, width, x, y);
+        
+        const magnitude = Math.sqrt(gradX * gradX + gradY * gradY);
+        const orientation = Math.atan2(gradY, gradX);
 
-        descriptor[descriptorIndex++] = gradient;
-        descriptor[descriptorIndex++] = orientation;
+        descriptor[idx++] = magnitude;
+        descriptor[idx++] = orientation;
 
-        if (gradient > 25) {
-          hasSignificantFeature = true;
+        if (magnitude > 25) {
+          hasSignificantGradient = true;
         }
       }
     }
 
-    return hasSignificantFeature ? descriptor : null;
+    return hasSignificantGradient ? descriptor : null;
+  }
+
+  getGradientX(data, width, x, y) {
+    const idx = (y * width + x) * 4;
+    return (data[idx + 4] || 0) - (data[idx - 4] || 0);
+  }
+
+  getGradientY(data, width, x, y) {
+    const idx = (y * width + x) * 4;
+    return (data[idx + width * 4] || 0) - (data[idx - width * 4] || 0);
+  }
+
+  computeFeatureStrength(data, width, x, y) {
+    let sum = 0;
+    const size = this.gridSize;
+    
+    for (let dy = -size; dy <= size; dy++) {
+      for (let dx = -size; dx <= size; dx++) {
+        const gradX = this.getGradientX(data, width, x + dx, y + dy);
+        const gradY = this.getGradientY(data, width, x + dx, y + dy);
+        sum += Math.sqrt(gradX * gradX + gradY * gradY);
+      }
+    }
+    
+    return sum;
   }
 
   matchFrame(currentFrame) {
@@ -97,43 +134,115 @@ class ImageMatcher {
       return { matched: false };
     }
 
-    const currentFeatures = this.extractFeatures(currentFrame);
+    let bestMatch = { matched: false, confidence: 0 };
+
+    for (const scale of this.scales) {
+      const scaledFeatures = this.extractScaledFeatures(currentFrame, scale);
+      const matchResult = this.matchFeaturesAtScale(scaledFeatures, currentFrame, scale);
+      
+      if (matchResult.matched && matchResult.confidence > bestMatch.confidence) {
+        bestMatch = matchResult;
+      }
+    }
+
+    if (bestMatch.matched) {
+      // Apply position smoothing
+      if (this.lastMatchPosition) {
+        bestMatch.position = {
+          x: this.lastMatchPosition.x * this.smoothingFactor + 
+             bestMatch.position.x * (1 - this.smoothingFactor),
+          y: this.lastMatchPosition.y * this.smoothingFactor + 
+             bestMatch.position.y * (1 - this.smoothingFactor)
+        };
+      }
+      this.lastMatchPosition = bestMatch.position;
+    }
+
+    return bestMatch;
+  }
+
+  extractScaledFeatures(frame, scale) {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(frame.width * scale);
+    canvas.height = Math.round(frame.height * scale);
+    
+    const ctx = canvas.getContext('2d');
+    const scaledImage = document.createElement('canvas');
+    scaledImage.width = frame.width;
+    scaledImage.height = frame.height;
+    scaledImage.getContext('2d').putImageData(frame, 0, 0);
+    
+    ctx.drawImage(scaledImage, 0, 0, canvas.width, canvas.height);
+    return this.extractFeatures(ctx.getImageData(0, 0, canvas.width, canvas.height));
+  }
+
+  matchFeaturesAtScale(currentFeatures, frame, scale) {
     const matches = [];
+    const matchedRefPoints = new Set();
 
     for (const cf of currentFeatures) {
       let bestMatch = { distance: Infinity, feature: null };
       let secondBest = { distance: Infinity };
 
       for (const rf of this.referenceFeatures) {
-        const distance = this.computeDistance(cf.descriptor, rf.descriptor);
+        if (matchedRefPoints.has(rf)) continue;
         
+        const distance = this.computeDistance(cf.descriptor, rf.descriptor);
         if (distance < bestMatch.distance) {
-          secondBest.distance = bestMatch.distance;
+          secondBest = { distance: bestMatch.distance };
           bestMatch = { distance, feature: rf };
         } else if (distance < secondBest.distance) {
-          secondBest.distance = distance;
+          secondBest = { distance };
         }
       }
 
       if (bestMatch.distance < this.matchThreshold * secondBest.distance) {
         matches.push({
           current: cf,
-          reference: bestMatch.feature
+          reference: bestMatch.feature,
+          distance: bestMatch.distance
         });
+        matchedRefPoints.add(bestMatch.feature);
       }
     }
 
-    if (matches.length >= 8) {
-      const { x, y, scale } = this.computeTransformation(matches, currentFrame);
+    if (matches.length >= this.minMatches) {
+      const position = this.computeMarkerPosition(matches, frame, scale);
       return {
         matched: true,
-        position: { x, y },
-        scale: scale,
-        confidence: matches.length / Math.min(currentFeatures.length, this.referenceFeatures.length)
+        position,
+        scale,
+        confidence: matches.length / this.maxFeatures
       };
     }
 
     return { matched: false };
+  }
+
+  computeMarkerPosition(matches, frame, scale) {
+    let sumX = 0, sumY = 0;
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+
+    matches.forEach(match => {
+      sumX += match.current.x;
+      sumY += match.current.y;
+      
+      minX = Math.min(minX, match.current.x);
+      maxX = Math.max(maxX, match.current.x);
+      minY = Math.min(minY, match.current.y);
+      maxY = Math.max(maxY, match.current.y);
+    });
+
+    const centerX = (sumX / matches.length) / scale;
+    const centerY = (sumY / matches.length) / scale;
+    
+    return {
+      x: (centerX / frame.width) * 100,
+      y: (centerY / frame.height) * 100,
+      width: ((maxX - minX) / scale) / frame.width * 100,
+      height: ((maxY - minY) / scale) / frame.height * 100
+    };
   }
 
   computeDistance(desc1, desc2) {
@@ -143,23 +252,6 @@ class ImageMatcher {
       sum += diff * diff;
     }
     return Math.sqrt(sum);
-  }
-
-  computeTransformation(matches, currentFrame) {
-    let sumX = 0, sumY = 0;
-    matches.forEach(match => {
-      sumX += match.current.x;
-      sumY += match.current.y;
-    });
-
-    const centerX = sumX / matches.length;
-    const centerY = sumY / matches.length;
-
-    return {
-      x: (centerX / currentFrame.width) * 100,
-      y: (centerY / currentFrame.height) * 100,
-      scale: 1.0
-    };
   }
 }
 
@@ -177,7 +269,7 @@ const App = () => {
   const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
   const [canvasSize, setCanvasSize] = useState({ width: 40, height: 40 });
   const [matchConfidence, setMatchConfidence] = useState(0);
-  const [isCanvasDetected, setIsCanvasDetected] = useState(false);
+  const [isMarkerDetected, setIsMarkerDetected] = useState(false);
 
   useEffect(() => {
     const loadContent = async () => {
@@ -187,7 +279,7 @@ const App = () => {
       }
 
       try {
-        setDebugInfo('Verifying content...');
+        setDebugInfo('Loading content...');
         const arContentRef = collection(db, 'arContent');
         const q = query(
           arContentRef,
@@ -208,7 +300,7 @@ const App = () => {
         if (initialized) {
           setDebugInfo('Ready - Show image marker');
         } else {
-          setDebugInfo('Failed to initialize image matching');
+          setDebugInfo('Failed to initialize matcher');
         }
       } catch (error) {
         console.error('Content loading error:', error);
@@ -227,16 +319,16 @@ const App = () => {
       overlayVideoRef.current.muted = false;
       await overlayVideoRef.current.play();
       setIsVideoPlaying(true);
-      setDebugInfo('Video playing with sound');
+      setDebugInfo('Video playing');
     } catch (error) {
       console.error('Video playback error:', error);
-      setDebugInfo('Tap to enable sound');
+      setDebugInfo('Tap screen for sound');
       
       const playOnTap = async () => {
         try {
           await overlayVideoRef.current?.play();
           setIsVideoPlaying(true);
-          setDebugInfo('Video playing with sound');
+          setDebugInfo('Video playing');
           document.removeEventListener('click', playOnTap);
         } catch (err) {
           console.error('Playback error:', err);
@@ -268,19 +360,19 @@ const App = () => {
     
     const result = imageMatcher.current.matchFrame(currentFrame);
     if (result.matched) {
-      setIsCanvasDetected(true);
+      setIsMarkerDetected(true);
       setMatchConfidence(result.confidence);
       setCanvasPosition(result.position);
       setCanvasSize({
-        width: Math.min(40 * result.scale, 60),
-        height: Math.min(40 * result.scale, 60)
+        width: Math.max(20, Math.min(60, result.position.width)),
+        height: Math.max(20, Math.min(60, result.position.height))
       });
 
       if (!isVideoPlaying) {
         startVideo();
       }
     } else {
-      setIsCanvasDetected(false);
+      setIsMarkerDetected(false);
       setMatchConfidence(0);
     }
 
@@ -304,7 +396,7 @@ const App = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-          setDebugInfo('Camera ready - Show image marker');
+          setDebugInfo('Camera ready - Show marker');
           animationFrameRef.current = requestAnimationFrame(processFrame);
         }
       } catch (error) {
@@ -366,7 +458,20 @@ const App = () => {
       color: 'white',
       padding: '10px',
       borderRadius: '5px',
-      zIndex: 30
+      zIndex: 30,
+      fontSize: '14px'
+    },
+    markerIndicator: {
+      position: 'absolute',
+      top: 20,
+      right: 20,
+      padding: '8px 12px',
+      borderRadius: '5px',
+      zIndex: 30,
+      fontSize: '14px',
+      backgroundColor: isMarkerDetected ? 'rgba(0,255,0,0.7)' : 'rgba(255,0,0,0.7)',
+      color: 'white',
+      transition: 'background-color 0.3s ease'
     }
   };
 
@@ -401,9 +506,12 @@ const App = () => {
         <div>Status: {debugInfo}</div>
         <div>Key: {contentKey || 'Not found'}</div>
         <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
-        <div>Marker Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
         <div>Match Confidence: {(matchConfidence * 100).toFixed(1)}%</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
+      </div>
+
+      <div style={styles.markerIndicator}>
+        {isMarkerDetected ? 'Marker Detected' : 'Scanning...'}
       </div>
     </div>
   );
