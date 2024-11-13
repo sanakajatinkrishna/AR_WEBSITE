@@ -1,8 +1,7 @@
+// App.js
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getStorage, ref, getDownloadURL } from 'firebase/storage';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
-import { useLocation } from 'react-router-dom';
 
 // Firebase Configuration
 const firebaseConfig = {
@@ -18,12 +17,10 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
-const storage = getStorage(app);
 
-const ARViewer = () => {
-  const location = useLocation();
-  const params = new URLSearchParams(location.search);
-  const contentKey = params.get('key');
+const App = () => {
+  // Get content key directly from URL
+  const contentKey = new URLSearchParams(window.location.search).get('key');
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -38,7 +35,49 @@ const ARViewer = () => {
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [isCanvasDetected, setIsCanvasDetected] = useState(false);
 
-  // Detect canvas in the frame
+  // Load content based on key
+  useEffect(() => {
+    const loadContent = async () => {
+      if (!contentKey) {
+        setDebugInfo('No content key found');
+        return;
+      }
+
+      try {
+        console.log('Loading content for key:', contentKey);
+        setDebugInfo('Verifying content...');
+
+        const arContentRef = collection(db, 'arContent');
+        const q = query(
+          arContentRef,
+          where('contentKey', '==', contentKey),
+          where('isActive', '==', true)
+        );
+
+        const snapshot = await getDocs(q);
+        
+        if (snapshot.empty) {
+          console.log('No content found');
+          setDebugInfo('Invalid or inactive content');
+          return;
+        }
+
+        const doc = snapshot.docs[0];
+        const data = doc.data();
+        console.log('Content found:', data);
+
+        setVideoUrl(data.videoUrl);
+        setDebugInfo('Content loaded - Please show image');
+
+      } catch (error) {
+        console.error('Content loading error:', error);
+        setDebugInfo(`Error: ${error.message}`);
+      }
+    };
+
+    loadContent();
+  }, [contentKey]);
+
   const detectCanvas = useCallback((imageData) => {
     const width = imageData.width;
     const height = imageData.height;
@@ -175,55 +214,9 @@ const ARViewer = () => {
     animationFrameRef.current = requestAnimationFrame(processFrame);
   }, [detectCanvas, startVideo, isCanvasDetected]);
 
-  // Load specific video based on content key
-  useEffect(() => {
-    const loadContentVideo = async () => {
-      if (!contentKey) {
-        setDebugInfo('No content key provided');
-        return;
-      }
-
-      try {
-        setDebugInfo('Verifying content key...');
-        const arContentRef = collection(db, 'arContent');
-        const q = query(
-          arContentRef,
-          where('contentKey', '==', contentKey),
-          where('isActive', '==', true)
-        );
-        
-        const snapshot = await getDocs(q);
-        
-        if (snapshot.empty) {
-          setDebugInfo('Invalid or inactive content key');
-          return;
-        }
-
-        const doc = snapshot.docs[0];
-        const data = doc.data();
-
-        if (data.videoPath) {
-          const videoRef = ref(storage, data.videoPath);
-          const url = await getDownloadURL(videoRef);
-          setVideoUrl(url);
-        } else {
-          setVideoUrl(data.videoUrl);
-        }
-        
-        setDebugInfo('Content verified - Show canvas');
-      } catch (error) {
-        console.error('Error loading video:', error);
-        setDebugInfo(`Loading error: ${error.message}`);
-      }
-    };
-
-    loadContentVideo();
-  }, [contentKey]);
-
   useEffect(() => {
     let isComponentMounted = true;
     let currentStream = null;
-    let videoElement = null;
 
     const startCamera = async () => {
       try {
@@ -249,12 +242,12 @@ const ARViewer = () => {
 
         currentStream = stream;
         if (videoRef.current) {
-          videoElement = videoRef.current;
-          videoElement.srcObject = stream;
-          await videoElement.play();
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+          console.log('Camera started');
           
           if (isComponentMounted) {
-            setDebugInfo('Camera ready - Show canvas');
+            setDebugInfo('Camera ready - Show image');
             animationFrameRef.current = requestAnimationFrame(processFrame);
           }
         }
@@ -267,6 +260,7 @@ const ARViewer = () => {
     };
 
     if (videoUrl) {
+      console.log('Starting camera');
       startCamera();
     }
 
@@ -277,9 +271,6 @@ const ARViewer = () => {
       }
       if (currentStream) {
         currentStream.getTracks().forEach(track => track.stop());
-      }
-      if (videoElement) {
-        videoElement.srcObject = null;
       }
     };
   }, [processFrame, videoUrl]);
@@ -329,47 +320,40 @@ const ARViewer = () => {
 
   return (
     <div style={styles.container}>
-      {!contentKey ? (
-        <div style={styles.debugInfo}>
-          <div>Error: Invalid QR code or missing content key</div>
-        </div>
-      ) : (
-        <>
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            style={styles.video}
-          />
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        style={styles.video}
+      />
 
-          <canvas
-            ref={canvasRef}
-            style={styles.canvas}
-          />
+      <canvas
+        ref={canvasRef}
+        style={styles.canvas}
+      />
 
-          {videoUrl && (
-            <video
-              ref={overlayVideoRef}
-              style={styles.overlayVideo}
-              autoPlay
-              playsInline
-              loop
-              muted={false}
-              controls={false}
-            />
-          )}
-
-          <div style={styles.debugInfo}>
-            <div>Status: {debugInfo}</div>
-            <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
-            <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
-            <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
-          </div>
-        </>
+      {videoUrl && (
+        <video
+          ref={overlayVideoRef}
+          style={styles.overlayVideo}
+          autoPlay
+          playsInline
+          loop
+          muted={false}
+          controls={false}
+        />
       )}
+
+      <div style={styles.debugInfo}>
+        <div>Status: {debugInfo}</div>
+        <div>Key: {contentKey || 'Not found'}</div>
+        <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
+        <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
+        <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
+      </div>
     </div>
   );
 };
 
-export default ARViewer;
+export default App;
