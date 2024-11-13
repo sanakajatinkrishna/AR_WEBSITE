@@ -22,13 +22,13 @@ class ImageMatcher {
   constructor() {
     this.referenceImage = null;
     this.referenceFeatures = null;
-    this.matchThreshold = 0.65;
-    this.minMatches = 6;
+    this.matchThreshold = 0.75; // Increased threshold for more lenient matching
+    this.minMatches = 5; // Reduced minimum matches required
     this.lastMatchPosition = null;
-    this.smoothingFactor = 0.7;
+    this.smoothingFactor = 0.6;
     this.scales = [0.5, 0.75, 1.0, 1.25, 1.5];
-    this.gridSize = 10;
-    this.maxFeatures = 200;
+    this.gridSize = 8; // Reduced grid size for more features
+    this.maxFeatures = 300; // Increased max features
   }
 
   async initialize(imageUrl) {
@@ -46,6 +46,9 @@ class ImageMatcher {
       this.referenceImage = ctx.getImageData(0, 0, img.width, img.height);
       this.referenceFeatures = this.extractFeatures(this.referenceImage);
       console.log('Reference features extracted:', this.referenceFeatures.length);
+      
+      // Debug log of feature distribution
+      this.logFeatureDistribution(this.referenceFeatures, img.width, img.height);
       return true;
     } catch (error) {
       console.error('Reference image initialization failed:', error);
@@ -53,36 +56,54 @@ class ImageMatcher {
     }
   }
 
+  logFeatureDistribution(features, width, height) {
+    console.log('Feature distribution analysis:');
+    const gridCells = 4;
+    const cellWidth = width / gridCells;
+    const cellHeight = height / gridCells;
+    const distribution = Array(gridCells * gridCells).fill(0);
+
+    features.forEach(feature => {
+      const gridX = Math.floor(feature.x / cellWidth);
+      const gridY = Math.floor(feature.y / cellHeight);
+      const idx = gridY * gridCells + gridX;
+      if (idx >= 0 && idx < distribution.length) {
+        distribution[idx]++;
+      }
+    });
+
+    console.log('Distribution matrix:', distribution);
+  }
+
   extractFeatures(imageData) {
     const features = [];
     const { width, height, data } = imageData;
+    const stepSize = Math.max(4, Math.floor(this.gridSize / 2)); // Smaller step size
 
-    for (let y = this.gridSize; y < height - this.gridSize; y += this.gridSize) {
-      for (let x = this.gridSize; x < width - this.gridSize; x += this.gridSize) {
+    for (let y = this.gridSize; y < height - this.gridSize; y += stepSize) {
+      for (let x = this.gridSize; x < width - this.gridSize; x += stepSize) {
         const descriptor = this.computeDescriptor(data, width, x, y);
         if (descriptor) {
-          features.push({
-            x,
-            y,
-            descriptor,
-            strength: this.computeFeatureStrength(data, width, x, y)
-          });
+          const strength = this.computeFeatureStrength(data, width, x, y);
+          if (strength > 1000) { // Only keep strong features
+            features.push({ x, y, descriptor, strength });
+          }
         }
       }
     }
 
-    // Sort by strength and keep top features
     features.sort((a, b) => b.strength - a.strength);
     return features.slice(0, this.maxFeatures);
   }
 
   computeDescriptor(data, width, centerX, centerY) {
-    const descriptor = new Float32Array(128);
+    const descriptor = new Float32Array(64); // Reduced descriptor size
     let idx = 0;
     let hasSignificantGradient = false;
+    const cellSize = 4; // Smaller cell size for more detail
 
-    for (let dy = -this.gridSize; dy <= this.gridSize; dy += 4) {
-      for (let dx = -this.gridSize; dx <= this.gridSize; dx += 4) {
+    for (let dy = -this.gridSize; dy <= this.gridSize; dy += cellSize) {
+      for (let dx = -this.gridSize; dx <= this.gridSize; dx += cellSize) {
         const x = centerX + dx;
         const y = centerY + dy;
         
@@ -95,38 +116,37 @@ class ImageMatcher {
         descriptor[idx++] = magnitude;
         descriptor[idx++] = orientation;
 
-        if (magnitude > 25) {
+        if (magnitude > 20) { // Reduced threshold for significant gradients
           hasSignificantGradient = true;
         }
       }
     }
 
-    return hasSignificantGradient ? descriptor : null;
+    return hasSignificantGradient ? this.normalizeDescriptor(descriptor) : null;
+  }
+
+  normalizeDescriptor(descriptor) {
+    const norm = Math.sqrt(descriptor.reduce((sum, val) => sum + val * val, 0));
+    if (norm > 0) {
+      for (let i = 0; i < descriptor.length; i++) {
+        descriptor[i] /= norm;
+      }
+    }
+    return descriptor;
   }
 
   getGradientX(data, width, x, y) {
     const idx = (y * width + x) * 4;
-    return (data[idx + 4] || 0) - (data[idx - 4] || 0);
+    const left = data[idx - 4] || data[idx];
+    const right = data[idx + 4] || data[idx];
+    return right - left;
   }
 
   getGradientY(data, width, x, y) {
     const idx = (y * width + x) * 4;
-    return (data[idx + width * 4] || 0) - (data[idx - width * 4] || 0);
-  }
-
-  computeFeatureStrength(data, width, x, y) {
-    let sum = 0;
-    const size = this.gridSize;
-    
-    for (let dy = -size; dy <= size; dy++) {
-      for (let dx = -size; dx <= size; dx++) {
-        const gradX = this.getGradientX(data, width, x + dx, y + dy);
-        const gradY = this.getGradientY(data, width, x + dx, y + dy);
-        sum += Math.sqrt(gradX * gradX + gradY * gradY);
-      }
-    }
-    
-    return sum;
+    const up = data[idx - width * 4] || data[idx];
+    const down = data[idx + width * 4] || data[idx];
+    return down - up;
   }
 
   matchFrame(currentFrame) {
@@ -135,7 +155,9 @@ class ImageMatcher {
     }
 
     let bestMatch = { matched: false, confidence: 0 };
+    const startTime = performance.now();
 
+    // Process the frame at different scales
     for (const scale of this.scales) {
       const scaledFeatures = this.extractScaledFeatures(currentFrame, scale);
       const matchResult = this.matchFeaturesAtScale(scaledFeatures, currentFrame, scale);
@@ -145,8 +167,9 @@ class ImageMatcher {
       }
     }
 
+    console.log(`Frame processing time: ${performance.now() - startTime}ms`);
+
     if (bestMatch.matched) {
-      // Apply position smoothing
       if (this.lastMatchPosition) {
         bestMatch.position = {
           x: this.lastMatchPosition.x * this.smoothingFactor + 
@@ -156,29 +179,17 @@ class ImageMatcher {
         };
       }
       this.lastMatchPosition = bestMatch.position;
+    } else {
+      this.lastMatchPosition = null;
     }
 
     return bestMatch;
   }
 
-  extractScaledFeatures(frame, scale) {
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.round(frame.width * scale);
-    canvas.height = Math.round(frame.height * scale);
-    
-    const ctx = canvas.getContext('2d');
-    const scaledImage = document.createElement('canvas');
-    scaledImage.width = frame.width;
-    scaledImage.height = frame.height;
-    scaledImage.getContext('2d').putImageData(frame, 0, 0);
-    
-    ctx.drawImage(scaledImage, 0, 0, canvas.width, canvas.height);
-    return this.extractFeatures(ctx.getImageData(0, 0, canvas.width, canvas.height));
-  }
-
   matchFeaturesAtScale(currentFeatures, frame, scale) {
     const matches = [];
     const matchedRefPoints = new Set();
+    let totalDistance = 0;
 
     for (const cf of currentFeatures) {
       let bestMatch = { distance: Infinity, feature: null };
@@ -196,6 +207,7 @@ class ImageMatcher {
         }
       }
 
+      // More lenient matching criteria
       if (bestMatch.distance < this.matchThreshold * secondBest.distance) {
         matches.push({
           current: cf,
@@ -203,16 +215,22 @@ class ImageMatcher {
           distance: bestMatch.distance
         });
         matchedRefPoints.add(bestMatch.feature);
+        totalDistance += bestMatch.distance;
       }
     }
 
     if (matches.length >= this.minMatches) {
+      const averageDistance = totalDistance / matches.length;
+      const confidence = 1 - (averageDistance / this.matchThreshold);
       const position = this.computeMarkerPosition(matches, frame, scale);
+      
+      console.log(`Matches found: ${matches.length}, Confidence: ${confidence}`);
+      
       return {
         matched: true,
         position,
         scale,
-        confidence: matches.length / this.maxFeatures
+        confidence: Math.max(0.1, Math.min(1.0, confidence))
       };
     }
 
@@ -220,29 +238,77 @@ class ImageMatcher {
   }
 
   computeMarkerPosition(matches, frame, scale) {
-    let sumX = 0, sumY = 0;
+    // Remove outliers using statistical analysis
+    const positions = matches.map(m => ({
+      x: m.current.x / scale,
+      y: m.current.y / scale
+    }));
+
+    const { filteredPositions, medianX, medianY } = this.removeOutliers(positions);
+
+    // Compute bounding box of inlier matches
     let minX = Infinity, maxX = -Infinity;
     let minY = Infinity, maxY = -Infinity;
 
-    matches.forEach(match => {
-      sumX += match.current.x;
-      sumY += match.current.y;
-      
-      minX = Math.min(minX, match.current.x);
-      maxX = Math.max(maxX, match.current.x);
-      minY = Math.min(minY, match.current.y);
-      maxY = Math.max(maxY, match.current.y);
+    filteredPositions.forEach(pos => {
+      minX = Math.min(minX, pos.x);
+      maxX = Math.max(maxX, pos.x);
+      minY = Math.min(minY, pos.y);
+      maxY = Math.max(maxY, pos.y);
     });
 
-    const centerX = (sumX / matches.length) / scale;
-    const centerY = (sumY / matches.length) / scale;
-    
     return {
-      x: (centerX / frame.width) * 100,
-      y: (centerY / frame.height) * 100,
-      width: ((maxX - minX) / scale) / frame.width * 100,
-      height: ((maxY - minY) / scale) / frame.height * 100
+      x: (medianX / frame.width) * 100,
+      y: (medianY / frame.height) * 100,
+      width: ((maxX - minX) / frame.width) * 100,
+      height: ((maxY - minY) / frame.height) * 100
     };
+  }
+
+  removeOutliers(positions) {
+    const xs = positions.map(p => p.x);
+    const ys = positions.map(p => p.y);
+
+    const medianX = this.median(xs);
+    const medianY = this.median(ys);
+    const madX = this.mad(xs);
+    const madY = this.mad(ys);
+
+    const threshold = 2.5; // Adjust this value to control outlier detection
+    const filteredPositions = positions.filter(pos => {
+      const deviationX = Math.abs(pos.x - medianX) / madX;
+      const deviationY = Math.abs(pos.y - medianY) / madY;
+      return deviationX < threshold && deviationY < threshold;
+    });
+
+    return { filteredPositions, medianX, medianY };
+  }
+
+  median(values) {
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  mad(values) {
+    const med = this.median(values);
+    const deviations = values.map(v => Math.abs(v - med));
+    return this.median(deviations);
+  }
+
+  extractScaledFeatures(frame, scale) {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(frame.width * scale);
+    canvas.height = Math.round(frame.height * scale);
+    
+    const ctx = canvas.getContext('2d');
+    const scaledImage = document.createElement('canvas');
+    scaledImage.width = frame.width;
+    scaledImage.height = frame.height;
+    scaledImage.getContext('2d').putImageData(frame, 0, 0);
+    
+    ctx.drawImage(scaledImage, 0, 0, canvas.width, canvas.height);
+    return this.extractFeatures(ctx.getImageData(0, 0, canvas.width, canvas.height));
   }
 
   computeDistance(desc1, desc2) {
