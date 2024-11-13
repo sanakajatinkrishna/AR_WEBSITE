@@ -380,23 +380,56 @@ const App = () => {
 
     const startCamera = async () => {
       try {
+        // Request highest quality video possible
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
+            // Ask for highest quality
+            width: { ideal: 4096 },
+            height: { ideal: 2160 },
+            frameRate: { ideal: 60 },
+            // Request best quality
+            advanced: [
+              {
+                // Prioritize resolution and focus
+                autoFocus: 'continuous',
+                focusMode: 'continuous',
+                exposureMode: 'continuous',
+                whiteBalanceMode: 'continuous'
+              }
+            ]
           }
         });
 
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
+          // Set video element to maintain quality
+          videoRef.current.setAttribute('playsinline', true);
           await videoRef.current.play();
           setDebugInfo('Camera ready - Show marker');
           animationFrameRef.current = requestAnimationFrame(processFrame);
         }
       } catch (error) {
         console.error('Camera error:', error);
-        setDebugInfo('Camera error - Please allow camera access');
+        // If high quality fails, try fallback options
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: 'environment',
+            }
+          });
+          
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            videoRef.current.setAttribute('playsinline', true);
+            await videoRef.current.play();
+            setDebugInfo('Camera ready (fallback mode)');
+            animationFrameRef.current = requestAnimationFrame(processFrame);
+          }
+        } catch (fallbackError) {
+          console.error('Fallback camera error:', fallbackError);
+          setDebugInfo('Camera error - Please allow camera access');
+        }
       }
     };
 
@@ -414,6 +447,7 @@ const App = () => {
     };
   }, [processFrame, videoUrl, imageUrl]);
 
+
   const styles = {
     container: {
       position: 'fixed',
@@ -424,7 +458,10 @@ const App = () => {
       position: 'absolute',
       width: '100%',
       height: '100%',
-      objectFit: 'cover'
+      objectFit: 'cover',
+            imageRendering: 'high-quality',
+      willChange: 'transform'
+
     },
     canvas: {
       position: 'absolute',
@@ -468,7 +505,9 @@ const App = () => {
       fontSize: '14px',
       backgroundColor: isMarkerDetected ? 'rgba(0,255,0,0.7)' : 'rgba(255,0,0,0.7)',
       color: 'white',
-      transition: 'background-color 0.3s ease'
+      transition: 'background-color 0.3s ease',
+       imageRendering: 'high-quality',
+      willChange: 'transform'
     },
     targetImage: {
       position: 'absolute',
