@@ -18,128 +18,24 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-class ImageMatcher {
-  constructor() {
-    this.templateImageData = null;
-    this.templateWidth = 0;
-    this.templateHeight = 0;
-  }
-
-  async initialize(imageUrl) {
-    try {
-      const response = await fetch(imageUrl);
-      const blob = await response.blob();
-      const img = await createImageBitmap(blob);
-      
-      // Create a canvas to process the template image
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      
-      this.templateImageData = ctx.getImageData(0, 0, img.width, img.height);
-      this.templateWidth = img.width;
-      this.templateHeight = img.height;
-      
-      console.log('Template initialized:', img.width, 'x', img.height);
-      return true;
-    } catch (error) {
-      console.error('Template initialization failed:', error);
-      return false;
-    }
-  }
-
-  findMatches(frameImageData) {
-    const { width: frameWidth, height: frameHeight } = frameImageData;
-    const stepSize = 16; // Scan step size
-    const scales = [0.5, 0.75, 1, 1.25, 1.5];
-    let bestMatch = { score: 0, x: 0, y: 0, scale: 1 };
-
-    for (const scale of scales) {
-      const searchWidth = Math.floor(this.templateWidth * scale);
-      const searchHeight = Math.floor(this.templateHeight * scale);
-
-      // Skip if scaled template is larger than frame
-      if (searchWidth > frameWidth || searchHeight > frameHeight) continue;
-
-      for (let y = 0; y < frameHeight - searchHeight; y += stepSize) {
-        for (let x = 0; x < frameWidth - searchWidth; x += stepSize) {
-          const score = this.compareRegion(frameImageData, x, y, searchWidth, searchHeight);
-          
-          if (score > bestMatch.score) {
-            bestMatch = { score, x, y, scale, width: searchWidth, height: searchHeight };
-          }
-        }
-      }
-    }
-
-    // Return match if score is above threshold
-    if (bestMatch.score > 0.5) {
-      return {
-        matched: true,
-        position: {
-          x: (bestMatch.x + bestMatch.width/2) / frameWidth * 100,
-          y: (bestMatch.y + bestMatch.height/2) / frameHeight * 100
-        },
-        size: {
-          width: (bestMatch.width / frameWidth) * 100,
-          height: (bestMatch.height / frameHeight) * 100
-        },
-        confidence: bestMatch.score
-      };
-    }
-
-    return { matched: false };
-  }
-
-  compareRegion(frameImageData, startX, startY, width, height) {
-    const { data: frameData } = frameImageData;
-    const { data: templateData } = this.templateImageData;
-    const frameWidth = frameImageData.width;
-    let totalDiff = 0;
-    let samples = 0;
-
-    // Compare downsampled regions for speed
-    const sampleStep = 4;
-    
-    for (let y = 0; y < height; y += sampleStep) {
-      for (let x = 0; x < width; x += sampleStep) {
-        const frameIdx = ((startY + y) * frameWidth + (startX + x)) * 4;
-        const templateIdx = (Math.floor(y * this.templateHeight / height) * this.templateWidth + 
-                           Math.floor(x * this.templateWidth / width)) * 4;
-
-        // Compare RGB values
-        const rDiff = Math.abs(frameData[frameIdx] - templateData[templateIdx]);
-        const gDiff = Math.abs(frameData[frameIdx + 1] - templateData[templateIdx + 1]);
-        const bDiff = Math.abs(frameData[frameIdx + 2] - templateData[templateIdx + 2]);
-        
-        totalDiff += (rDiff + gDiff + bDiff) / 3;
-        samples++;
-      }
-    }
-
-    // Convert difference to similarity score (0-1)
-    return 1 - (totalDiff / (samples * 255));
-  }
-}
-
 const App = () => {
+  // Get content key directly from URL
   const contentKey = new URLSearchParams(window.location.search).get('key');
+
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const animationFrameRef = useRef(null);
-  const imageMatcher = useRef(new ImageMatcher());
+  const trackedPositionRef = useRef({ x: 50, y: 50 });
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
   const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
-  const [canvasSize, setCanvasSize] = useState({ width: 40, height: 40 });
-  const [matchConfidence, setMatchConfidence] = useState(0);
-  const [isMarkerDetected, setIsMarkerDetected] = useState(false);
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  const [isCanvasDetected, setIsCanvasDetected] = useState(false);
 
+  // Load content based on key
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -148,7 +44,9 @@ const App = () => {
       }
 
       try {
-        setDebugInfo('Loading content...');
+        console.log('Loading content for key:', contentKey);
+        setDebugInfo('Verifying content...');
+
         const arContentRef = collection(db, 'arContent');
         const q = query(
           arContentRef,
@@ -157,21 +55,20 @@ const App = () => {
         );
 
         const snapshot = await getDocs(q);
+        
         if (snapshot.empty) {
+          console.log('No content found');
           setDebugInfo('Invalid or inactive content');
           return;
         }
 
-        const data = snapshot.docs[0].data();
-        console.log('Content loaded:', data);
+        const doc = snapshot.docs[0];
+        const data = doc.data();
+        console.log('Content found:', data);
+
         setVideoUrl(data.videoUrl);
-        
-        const initialized = await imageMatcher.current.initialize(data.imageUrl);
-        if (initialized) {
-          setDebugInfo('Ready - Show image marker');
-        } else {
-          setDebugInfo('Failed to initialize matcher');
-        }
+        setDebugInfo('Content loaded - Please show image');
+
       } catch (error) {
         console.error('Content loading error:', error);
         setDebugInfo(`Error: ${error.message}`);
@@ -181,6 +78,70 @@ const App = () => {
     loadContent();
   }, [contentKey]);
 
+  const detectCanvas = useCallback((imageData) => {
+    const width = imageData.width;
+    const height = imageData.height;
+    
+    let totalR = 0, totalG = 0, totalB = 0;
+    let samples = 0;
+
+    for (let y = 0; y < height; y += 4) {
+      for (let x = 0; x < width; x += 4) {
+        const i = (y * width + x) * 4;
+        totalR += imageData.data[i];
+        totalG += imageData.data[i + 1];
+        totalB += imageData.data[i + 2];
+        samples++;
+      }
+    }
+
+    const avgR = totalR / samples;
+    const avgG = totalG / samples;
+    const avgB = totalB / samples;
+
+    const hasContent = (avgR > 30 || avgG > 30 || avgB > 30) && 
+                      (avgR < 240 || avgG < 240 || avgB < 240);
+
+    if (hasContent) {
+      let left = width, right = 0, top = height, bottom = 0;
+
+      for (let y = 0; y < height; y += 2) {
+        for (let x = 0; x < width; x += 2) {
+          const i = (y * width + x) * 4;
+          const r = imageData.data[i];
+          const g = imageData.data[i + 1];
+          const b = imageData.data[i + 2];
+
+          if (Math.abs(r - avgR) > 20 || Math.abs(g - avgG) > 20 || Math.abs(b - avgB) > 20) {
+            left = Math.min(left, x);
+            right = Math.max(right, x);
+            top = Math.min(top, y);
+            bottom = Math.max(bottom, y);
+          }
+        }
+      }
+
+      const centerX = (left + right) / 2;
+      const centerY = (top + bottom) / 2;
+      const objWidth = right - left;
+      const objHeight = bottom - top;
+
+      const posX = (centerX / width) * 100;
+      const posY = (centerY / height) * 100;
+
+      trackedPositionRef.current.x = trackedPositionRef.current.x * 0.8 + posX * 0.2;
+      trackedPositionRef.current.y = trackedPositionRef.current.y * 0.8 + posY * 0.2;
+
+      return {
+        position: { x: trackedPositionRef.current.x, y: trackedPositionRef.current.y },
+        size: { width: objWidth, height: objHeight },
+        detected: true
+      };
+    }
+
+    return { detected: false };
+  }, []);
+
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
@@ -189,23 +150,23 @@ const App = () => {
       overlayVideoRef.current.muted = false;
       await overlayVideoRef.current.play();
       setIsVideoPlaying(true);
-      setDebugInfo('Video playing');
+      setDebugInfo('Video playing with sound');
     } catch (error) {
       console.error('Video playback error:', error);
-      setDebugInfo('Tap screen for sound');
+      setDebugInfo('Click anywhere to play video with sound');
       
-      const playOnTap = async () => {
-        try {
-          await overlayVideoRef.current?.play();
-          setIsVideoPlaying(true);
-          setDebugInfo('Video playing');
-          document.removeEventListener('click', playOnTap);
-        } catch (err) {
-          console.error('Playback error:', err);
+      const playOnClick = () => {
+        if (overlayVideoRef.current) {
+          overlayVideoRef.current.play()
+            .then(() => {
+              setIsVideoPlaying(true);
+              setDebugInfo('Video playing with sound');
+              document.removeEventListener('click', playOnClick);
+            })
+            .catch(console.error);
         }
       };
-      
-      document.addEventListener('click', playOnTap);
+      document.addEventListener('click', playOnClick);
     }
   }, [videoUrl, isVideoPlaying]);
 
@@ -218,69 +179,98 @@ const App = () => {
       return;
     }
 
-    const context = canvas.getContext('2d', { willReadFrequently: true });
-    
+    const context = canvas.getContext('2d', { 
+      willReadFrequently: true,
+      alpha: false 
+    });
+
     if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
     }
-
-    context.drawImage(video, 0, 0);
-    const currentFrame = context.getImageData(0, 0, canvas.width, canvas.height);
     
-    const result = imageMatcher.current.findMatches(currentFrame);
-    if (result.matched) {
-      setIsMarkerDetected(true);
-      setMatchConfidence(result.confidence);
+    context.drawImage(video, 0, 0);
+    
+    const centerWidth = canvas.width * 0.5;
+    const centerHeight = canvas.height * 0.5;
+    const x = (canvas.width - centerWidth) / 2;
+    const y = (canvas.height - centerHeight) / 2;
+    
+    const imageData = context.getImageData(x, y, centerWidth, centerHeight);
+    const result = detectCanvas(imageData);
+    
+    if (result.detected) {
       setCanvasPosition(result.position);
       setCanvasSize(result.size);
-
-      if (!isVideoPlaying) {
+      
+      if (!isCanvasDetected) {
+        setIsCanvasDetected(true);
         startVideo();
       }
-    } else {
-      setIsMarkerDetected(false);
-      setMatchConfidence(0);
+    } else if (isCanvasDetected) {
+      setIsCanvasDetected(false);
     }
 
     animationFrameRef.current = requestAnimationFrame(processFrame);
-  }, [startVideo, isVideoPlaying]);
+  }, [detectCanvas, startVideo, isCanvasDetected]);
 
   useEffect(() => {
-    let stream = null;
+    let isComponentMounted = true;
+    let currentStream = null;
 
     const startCamera = async () => {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
+        const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
             width: { ideal: 1280 },
-            height: { ideal: 720 }
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
           }
         });
 
+        if (!isComponentMounted) return;
+
+        const videoTrack = stream.getVideoTracks()[0];
+        await videoTrack.applyConstraints({
+          advanced: [
+            { exposureMode: "continuous" },
+            { focusMode: "continuous" },
+            { whiteBalanceMode: "continuous" }
+          ]
+        }).catch(() => {});
+
+        currentStream = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-          setDebugInfo('Camera ready - Show marker');
-          animationFrameRef.current = requestAnimationFrame(processFrame);
+          console.log('Camera started');
+          
+          if (isComponentMounted) {
+            setDebugInfo('Camera ready - Show image');
+            animationFrameRef.current = requestAnimationFrame(processFrame);
+          }
         }
       } catch (error) {
         console.error('Camera error:', error);
-        setDebugInfo(`Camera error: ${error.message}`);
+        if (isComponentMounted) {
+          setDebugInfo(`Camera error: ${error.message}`);
+        }
       }
     };
 
     if (videoUrl) {
+      console.log('Starting camera');
       startCamera();
     }
 
     return () => {
+      isComponentMounted = false;
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
+      if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
       }
     };
   }, [processFrame, videoUrl]);
@@ -310,8 +300,8 @@ const App = () => {
       top: `${canvasPosition.y}%`,
       left: `${canvasPosition.x}%`,
       transform: 'translate(-50%, -50%)',
-      width: `${canvasSize.width}vw`,
-      height: `${canvasSize.height}vh`,
+      width: `${Math.min(canvasSize.width * 1.2, 40)}vw`,
+      height: `${Math.min(canvasSize.height * 1.2, 40)}vh`,
       objectFit: 'contain',
       zIndex: 20,
       transition: 'all 0.1s ease-out'
@@ -324,20 +314,7 @@ const App = () => {
       color: 'white',
       padding: '10px',
       borderRadius: '5px',
-      zIndex: 30,
-      fontSize: '14px'
-    },
-    markerIndicator: {
-      position: 'absolute',
-      top: 20,
-      right: 20,
-      padding: '8px 12px',
-      borderRadius: '5px',
-      zIndex: 30,
-      fontSize: '14px',
-      backgroundColor: isMarkerDetected ? 'rgba(0,255,0,0.7)' : 'rgba(255,0,0,0.7)',
-      color: 'white',
-      transition: 'background-color 0.3s ease'
+      zIndex: 30
     }
   };
 
@@ -350,7 +327,7 @@ const App = () => {
         muted
         style={styles.video}
       />
-      
+
       <canvas
         ref={canvasRef}
         style={styles.canvas}
@@ -370,13 +347,10 @@ const App = () => {
 
       <div style={styles.debugInfo}>
         <div>Status: {debugInfo}</div>
+        <div>Key: {contentKey || 'Not found'}</div>
         <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
-        <div>Match Confidence: {(matchConfidence * 100).toFixed(1)}%</div>
+        <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
-      </div>
-
-      <div style={styles.markerIndicator}>
-        {isMarkerDetected ? 'Marker Detected' : 'Scanning...'}
       </div>
     </div>
   );
