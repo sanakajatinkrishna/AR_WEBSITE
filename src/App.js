@@ -272,33 +272,32 @@ const ImageMatcher = () => {
         </h1>
 
         {/* Match Percentage Display */}
-        {matchScore !== null && (
-          <div style={{
-            padding: '16px',
-            backgroundColor: matchScore > 70 ? '#ecfdf5' : matchScore > 40 ? '#fef3c7' : '#fee2e2',
-            borderRadius: '8px',
-            textAlign: 'center',
-            marginBottom: '20px',
-            transition: 'background-color 0.3s ease'
-          }}>
-            <h2 style={{ 
-              fontSize: '28px', 
-              fontWeight: 'bold',
-              color: matchScore > 70 ? '#059669' : matchScore > 40 ? '#b45309' : '#dc2626',
-              marginBottom: '8px'
-            }}>
-              {matchScore.toFixed(1)}% Match
-            </h2>
-            <p style={{ 
-              fontSize: '18px',
-              fontWeight: '500',
-              color: matchScore > 70 ? '#065f46' : matchScore > 40 ? '#92400e' : '#991b1b'
-            }}>
-              {matchScore > 70 ? "It's a match!" : 
-               matchScore > 40 ? "Partial match" : "No match found"}
-            </p>
-          </div>
-        )}
+{matchScore !== null && (
+  <div style={{
+    padding: '16px',
+    backgroundColor: matchScore > 70 ? '#ecfdf5' : matchScore > 40 ? '#fef3c7' : '#fee2e2',
+    borderRadius: '8px',
+    textAlign: 'center',
+    marginBottom: '20px',
+  }}>
+    <h2 style={{ 
+      fontSize: '28px', 
+      fontWeight: 'bold',
+      color: matchScore > 70 ? '#059669' : matchScore > 40 ? '#b45309' : '#dc2626',
+      marginBottom: '8px'
+    }}>
+      {matchScore.toFixed(1)}% Match
+    </h2>
+    <p style={{ 
+      fontSize: '18px',
+      fontWeight: '500',
+      color: matchScore > 70 ? '#065f46' : matchScore > 40 ? '#92400e' : '#991b1b'
+    }}>
+      {matchScore > 70 ? "It's a match!" : 
+       matchScore > 40 ? "Partial match" : "No match found"}
+    </p>
+  </div>
+)}
 
         {error && (
           <div style={{ 
@@ -388,21 +387,21 @@ const ImageMatcher = () => {
             </p>
 
             {/* Real-time Match Score Overlay */}
-            {matchScore !== null && (
-              <div style={{
-                position: 'absolute',
-                top: '10px',
-                right: '10px',
-                backgroundColor: 'rgba(0, 0, 0, 0.7)',
-                color: 'white',
-                padding: '8px 12px',
-                borderRadius: '20px',
-                fontSize: '16px',
-                fontWeight: 'bold'
-              }}>
-                {matchScore.toFixed(1)}%
-              </div>
-            )}
+{matchScore !== null && (
+  <div style={{
+    position: 'absolute',
+    top: '10px',
+    right: '10px',
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    color: 'white',
+    padding: '8px 12px',
+    borderRadius: '20px',
+    fontSize: '16px',
+    fontWeight: 'bold'
+  }}>
+    {matchScore.toFixed(1)}%
+  </div>
+)}
           </div>
         </div>
 
