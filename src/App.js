@@ -1,4 +1,3 @@
-// App.js
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
@@ -31,6 +30,7 @@ const App = () => {
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
+  const [imageUrl, setImageUrl] = useState(null);
   const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [isCanvasDetected, setIsCanvasDetected] = useState(false);
@@ -67,6 +67,7 @@ const App = () => {
         console.log('Content found:', data);
 
         setVideoUrl(data.videoUrl);
+        setImageUrl(data.imageUrl);
         setDebugInfo('Content loaded - Please show image');
 
       } catch (error) {
@@ -315,6 +316,21 @@ const App = () => {
       padding: '10px',
       borderRadius: '5px',
       zIndex: 30
+    },
+    imagePreview: {
+      position: 'absolute',
+      bottom: 20,
+      right: 20,
+      backgroundColor: 'rgba(0,0,0,0.7)',
+      padding: '10px',
+      borderRadius: '5px',
+      zIndex: 30
+    },
+    previewImage: {
+      width: '150px',
+      height: '150px',
+      objectFit: 'cover',
+      borderRadius: '5px'
     }
   };
 
@@ -352,6 +368,12 @@ const App = () => {
         <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
       </div>
+
+      {imageUrl && (
+        <div style={styles.imagePreview}>
+          <img src={imageUrl} alt="Target" style={styles.previewImage} />
+        </div>
+      )}
     </div>
   );
 };
