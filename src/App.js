@@ -31,7 +31,7 @@ const App = () => {
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [isCanvasDetected, setIsCanvasDetected] = useState(false);
   const [matchScore, setMatchScore] = useState(0);
-  const [matchStatus, setMatchStatus] = useState('Not checked yet');
+  const [matchStatus, setMatchStatus] = useState('');
 
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
@@ -176,10 +176,8 @@ const App = () => {
     const score = compareImages(capturedFrame, referenceData);
     setMatchScore(score);
     
-    const matchThreshold = 70;
-    setMatchStatus(`${score > matchThreshold ? 'Match Found!' : 'No Match Yet'} (Threshold: ${matchThreshold}%)`);
-
-    if (score > matchThreshold) {
+    if (score > 70) {
+      setMatchStatus('Match Found!');
       setIsCanvasDetected(true);
       startVideo();
       
@@ -193,6 +191,8 @@ const App = () => {
         width: canvas.width * 0.8,
         height: canvas.height * 0.8
       });
+    } else {
+      setMatchStatus('No Match Yet');
     }
   }, [compareImages, startVideo]);
 
@@ -204,9 +204,7 @@ const App = () => {
       }
 
       try {
-        console.log('Loading content for key:', contentKey);
         setDebugInfo('Verifying content...');
-
         const arContentRef = collection(db, 'arContent');
         const q = query(
           arContentRef,
@@ -217,14 +215,12 @@ const App = () => {
         const snapshot = await getDocs(q);
         
         if (snapshot.empty) {
-          console.log('No content found');
           setDebugInfo('Invalid or inactive content');
           return;
         }
 
         const doc = snapshot.docs[0];
         const data = doc.data();
-        console.log('Content found:', data);
 
         setVideoUrl(data.videoUrl);
         setImageUrl(data.imageUrl);
@@ -276,7 +272,6 @@ const App = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-          console.log('Camera started');
           
           if (isComponentMounted) {
             setDebugInfo('Camera ready - Show image');
@@ -291,7 +286,6 @@ const App = () => {
     };
 
     if (videoUrl) {
-      console.log('Starting camera');
       startCamera();
     }
 
@@ -415,7 +409,7 @@ const App = () => {
         <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
         <div>Match Score: {matchScore.toFixed(1)}%</div>
-        <div>Match Status: {matchStatus}</div>
+        {matchStatus && <div>Match Status: {matchStatus}</div>}
       </div>
 
       {imageUrl && (
