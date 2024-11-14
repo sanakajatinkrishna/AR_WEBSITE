@@ -4,12 +4,13 @@ import { getFirestore, collection, query, where, onSnapshot } from 'firebase/fir
 
 // Firebase configuration
 const firebaseConfig = {
-  apiKey: "AIzaSyAjpBWYLu_YxlKb0aZN6AHtLhPl8hX2U3k",
-  authDomain: "arinimations.firebaseapp.com",
-  projectId: "arinimations",
-  storageBucket: "arinimations.appspot.com",
-  messagingSenderId: "759940136955",
-  appId: "1:759940136955:web:76c2c73b94d8df97ff432b"
+  apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
+  authDomain: "app-1238f.firebaseapp.com",
+  projectId: "app-1238f",
+  storageBucket: "app-1238f.appspot.com",
+  messagingSenderId: "12576842624",
+  appId: "1:12576842624:web:92eb40fd8c56a9fc475765",
+  measurementId: "G-N5Q9K9G3JN"
 };
 
 // Initialize Firebase
