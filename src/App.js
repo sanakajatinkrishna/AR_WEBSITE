@@ -15,7 +15,6 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
-const storage = getStorage(app);
 
 const App = () => {
   const contentKey = new URLSearchParams(window.location.search).get('key');
@@ -178,55 +177,71 @@ const App = () => {
     return null;
   }, []);
 
-  useEffect(() => {
-    const loadContent = async () => {
-      if (!contentKey) {
-        setDebugInfo('No content key found');
+useEffect(() => {
+  const loadContent = async () => {
+    if (!contentKey) {
+      setDebugInfo('No content key found');
+      return;
+    }
+
+    try {
+      console.log('Loading content for key:', contentKey);
+      setDebugInfo('Verifying content...');
+
+      const arContentRef = collection(db, 'arContent');
+      const q = query(
+        arContentRef,
+        where('contentKey', '==', contentKey),
+        where('isActive', '==', true)
+      );
+
+      const snapshot = await getDocs(q);
+      
+      if (snapshot.empty) {
+        setDebugInfo('Invalid or inactive content');
         return;
       }
 
+      const doc = snapshot.docs[0];
+      const data = doc.data();
+
+      // Set video URL directly
+      setVideoUrl(data.videoUrl);
+      
+      // Get reference image URL
       try {
-        console.log('Loading content for key:', contentKey);
-        setDebugInfo('Verifying content...');
-
-        const arContentRef = collection(db, 'arContent');
-        const q = query(
-          arContentRef,
-          where('contentKey', '==', contentKey),
-          where('isActive', '==', true)
-        );
-
-        const snapshot = await getDocs(q);
-        
-        if (snapshot.empty) {
-          setDebugInfo('Invalid or inactive content');
-          return;
-        }
-
-        const doc = snapshot.docs[0];
-        const data = doc.data();
-
-        setVideoUrl(data.videoUrl);
-        
+        const storage = getStorage();
         const imageRef = ref(storage, data.referenceImagePath);
         const imageUrl = await getDownloadURL(imageRef);
         
+        // Load reference image
         const img = new Image();
         img.crossOrigin = "anonymous";
-        img.src = imageUrl;
+        
         img.onload = () => {
           setReferenceImage(img);
           setDebugInfo('Content loaded - Please show image');
         };
+        
+        img.onerror = (error) => {
+          console.error('Error loading reference image:', error);
+          setDebugInfo('Error loading reference image');
+        };
 
-      } catch (error) {
-        console.error('Content loading error:', error);
-        setDebugInfo(`Error: ${error.message}`);
+        img.src = imageUrl;
+      } catch (storageError) {
+        console.error('Storage error:', storageError);
+        setDebugInfo(`Storage error: ${storageError.message}`);
       }
-    };
 
-    loadContent();
-  }, [contentKey]);
+    } catch (error) {
+      console.error('Content loading error:', error);
+      setDebugInfo(`Error: ${error.message}`);
+    }
+  };
+
+  loadContent();
+}, [contentKey]);
 
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
