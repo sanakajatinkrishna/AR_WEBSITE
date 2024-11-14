@@ -205,16 +205,15 @@ useEffect(() => {
       const doc = snapshot.docs[0];
       const data = doc.data();
 
-      // Set video URL directly
       setVideoUrl(data.videoUrl);
       
-      // Get reference image URL
       try {
         const storage = getStorage();
-        const imageRef = ref(storage, data.referenceImagePath);
+        // Create storage reference with child path
+        const storageRef = ref(storage);
+        const imageRef = ref(storageRef, data.referenceImagePath);
         const imageUrl = await getDownloadURL(imageRef);
         
-        // Load reference image
         const img = new Image();
         img.crossOrigin = "anonymous";
         
@@ -242,7 +241,6 @@ useEffect(() => {
 
   loadContent();
 }, [contentKey]);
-
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
