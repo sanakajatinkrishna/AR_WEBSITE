@@ -271,34 +271,6 @@ const ImageMatcher = () => {
           AR Image Scanner
         </h1>
 
-        {/* Match Percentage Display */}
-{matchScore !== null && (
-  <div style={{
-    padding: '16px',
-    backgroundColor: matchScore > 70 ? '#ecfdf5' : matchScore > 40 ? '#fef3c7' : '#fee2e2',
-    borderRadius: '8px',
-    textAlign: 'center',
-    marginBottom: '20px',
-  }}>
-    <h2 style={{ 
-      fontSize: '28px', 
-      fontWeight: 'bold',
-      color: matchScore > 70 ? '#059669' : matchScore > 40 ? '#b45309' : '#dc2626',
-      marginBottom: '8px'
-    }}>
-      {matchScore.toFixed(1)}% Match
-    </h2>
-    <p style={{ 
-      fontSize: '18px',
-      fontWeight: '500',
-      color: matchScore > 70 ? '#065f46' : matchScore > 40 ? '#92400e' : '#991b1b'
-    }}>
-      {matchScore > 70 ? "It's a match!" : 
-       matchScore > 40 ? "Partial match" : "No match found"}
-    </p>
-  </div>
-)}
-
         {error && (
           <div style={{ 
             padding: '10px', 
@@ -385,32 +357,11 @@ const ImageMatcher = () => {
             }}>
               Camera Feed
             </p>
-
-            {/* Real-time Match Score Overlay */}
-{matchScore !== null && (
-  <div style={{
-    position: 'absolute',
-    top: '10px',
-    right: '10px',
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    color: 'white',
-    padding: '8px 12px',
-    borderRadius: '20px',
-    fontSize: '16px',
-    fontWeight: 'bold'
-  }}>
-    {matchScore.toFixed(1)}%
-  </div>
-)}
           </div>
         </div>
 
         {/* Camera Control */}
-        <div style={{ 
-          display: 'flex', 
-          justifyContent: 'center', 
-          marginBottom: '20px' 
-        }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px' }}>
           <button
             onClick={isStreaming ? stopCamera : startCamera}
             style={{
@@ -429,6 +380,37 @@ const ImageMatcher = () => {
           >
             {isStreaming ? "Stop Camera" : "Start Camera"}
           </button>
+
+          {/* Match Percentage Text */}
+          {matchScore !== null && (
+            <div style={{
+              textAlign: 'center',
+              padding: '16px',
+              backgroundColor: '#f3f4f6',
+              borderRadius: '8px',
+              width: '100%',
+              maxWidth: '300px'
+            }}>
+              <h3 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '8px' }}>
+                Match Percentage
+              </h3>
+              <p style={{ 
+                fontSize: '36px', 
+                fontWeight: 'bold',
+                color: matchScore > 70 ? '#059669' : matchScore > 40 ? '#d97706' : '#dc2626'
+              }}>
+                {matchScore.toFixed(1)}%
+              </p>
+              <p style={{ 
+                marginTop: '8px',
+                color: matchScore > 70 ? '#065f46' : matchScore > 40 ? '#92400e' : '#991b1b',
+                fontWeight: '500'
+              }}>
+                {matchScore > 70 ? "It's a match!" : 
+                 matchScore > 40 ? "Partial match" : "No match found"}
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </div>
