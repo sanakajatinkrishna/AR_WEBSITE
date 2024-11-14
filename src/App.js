@@ -1,9 +1,7 @@
-// App.js
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
 
-// Firebase Configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -14,14 +12,11 @@ const firebaseConfig = {
   measurementId: "G-N5Q9K9G3JN"
 };
 
-// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const App = () => {
-  // Get content key directly from URL
   const contentKey = new URLSearchParams(window.location.search).get('key');
-
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
@@ -31,52 +26,10 @@ const App = () => {
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
+  const [imageUrl, setImageUrl] = useState(null);
   const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [isCanvasDetected, setIsCanvasDetected] = useState(false);
-
-  // Load content based on key
-  useEffect(() => {
-    const loadContent = async () => {
-      if (!contentKey) {
-        setDebugInfo('No content key found');
-        return;
-      }
-
-      try {
-        console.log('Loading content for key:', contentKey);
-        setDebugInfo('Verifying content...');
-
-        const arContentRef = collection(db, 'arContent');
-        const q = query(
-          arContentRef,
-          where('contentKey', '==', contentKey),
-          where('isActive', '==', true)
-        );
-
-        const snapshot = await getDocs(q);
-        
-        if (snapshot.empty) {
-          console.log('No content found');
-          setDebugInfo('Invalid or inactive content');
-          return;
-        }
-
-        const doc = snapshot.docs[0];
-        const data = doc.data();
-        console.log('Content found:', data);
-
-        setVideoUrl(data.videoUrl);
-        setDebugInfo('Content loaded - Please show image');
-
-      } catch (error) {
-        console.error('Content loading error:', error);
-        setDebugInfo(`Error: ${error.message}`);
-      }
-    };
-
-    loadContent();
-  }, [contentKey]);
 
   const detectCanvas = useCallback((imageData) => {
     const width = imageData.width;
@@ -215,6 +168,49 @@ const App = () => {
   }, [detectCanvas, startVideo, isCanvasDetected]);
 
   useEffect(() => {
+    const loadContent = async () => {
+      if (!contentKey) {
+        setDebugInfo('No content key found');
+        return;
+      }
+
+      try {
+        console.log('Loading content for key:', contentKey);
+        setDebugInfo('Verifying content...');
+
+        const arContentRef = collection(db, 'arContent');
+        const q = query(
+          arContentRef,
+          where('contentKey', '==', contentKey),
+          where('isActive', '==', true)
+        );
+
+        const snapshot = await getDocs(q);
+        
+        if (snapshot.empty) {
+          console.log('No content found');
+          setDebugInfo('Invalid or inactive content');
+          return;
+        }
+
+        const doc = snapshot.docs[0];
+        const data = doc.data();
+        console.log('Content found:', data);
+
+        setVideoUrl(data.videoUrl);
+        setImageUrl(data.imageUrl);
+        setDebugInfo('Content loaded - Please show image');
+
+      } catch (error) {
+        console.error('Content loading error:', error);
+        setDebugInfo(`Error: ${error.message}`);
+      }
+    };
+
+    loadContent();
+  }, [contentKey]);
+
+  useEffect(() => {
     let isComponentMounted = true;
     let currentStream = null;
 
@@ -275,68 +271,32 @@ const App = () => {
     };
   }, [processFrame, videoUrl]);
 
-  const styles = {
-    container: {
-      position: 'fixed',
-      inset: 0,
-      backgroundColor: 'black'
-    },
-    video: {
-      position: 'absolute',
-      width: '100%',
-      height: '100%',
-      objectFit: 'cover'
-    },
-    canvas: {
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      width: '100%',
-      height: '100%',
-      display: 'none'
-    },
-    overlayVideo: {
-      position: 'absolute',
-      top: `${canvasPosition.y}%`,
-      left: `${canvasPosition.x}%`,
-      transform: 'translate(-50%, -50%)',
-      width: `${Math.min(canvasSize.width * 1.2, 40)}vw`,
-      height: `${Math.min(canvasSize.height * 1.2, 40)}vh`,
-      objectFit: 'contain',
-      zIndex: 20,
-      transition: 'all 0.1s ease-out'
-    },
-    debugInfo: {
-      position: 'absolute',
-      top: 20,
-      left: 20,
-      backgroundColor: 'rgba(0,0,0,0.7)',
-      color: 'white',
-      padding: '10px',
-      borderRadius: '5px',
-      zIndex: 30
-    }
-  };
-
   return (
-    <div style={styles.container}>
+    <div className="fixed inset-0 bg-black">
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        style={styles.video}
+        className="absolute w-full h-full object-cover"
       />
 
       <canvas
         ref={canvasRef}
-        style={styles.canvas}
+        className="absolute top-0 left-0 w-full h-full hidden"
       />
 
       {videoUrl && (
         <video
           ref={overlayVideoRef}
-          style={styles.overlayVideo}
+          className="absolute z-20 object-contain transition-all duration-100"
+          style={{
+            top: `${canvasPosition.y}%`,
+            left: `${canvasPosition.x}%`,
+            transform: 'translate(-50%, -50%)',
+            width: `${Math.min(canvasSize.width * 1.2, 40)}vw`,
+            height: `${Math.min(canvasSize.height * 1.2, 40)}vh`
+          }}
           autoPlay
           playsInline
           loop
@@ -345,12 +305,21 @@ const App = () => {
         />
       )}
 
-      <div style={styles.debugInfo}>
-        <div>Status: {debugInfo}</div>
-        <div>Key: {contentKey || 'Not found'}</div>
-        <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
-        <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
-        <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
+      <div className="absolute bottom-5 right-5 flex flex-col items-end gap-2 z-30">
+        <div className="bg-black/70 text-white p-3 rounded">
+          <div>Status: {debugInfo}</div>
+          <div>Key: {contentKey || 'Not found'}</div>
+          <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
+          <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
+          <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
+        </div>
+        {imageUrl && (
+          <img 
+            src={imageUrl} 
+            alt="Target"
+            className="w-40 h-40 object-contain bg-black/70 rounded p-2"
+          />
+        )}
       </div>
     </div>
   );
