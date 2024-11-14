@@ -4,13 +4,12 @@ import { getFirestore, collection, query, where, onSnapshot } from 'firebase/fir
 
 // Firebase configuration
 const firebaseConfig = {
-  apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
-  authDomain: "app-1238f.firebaseapp.com",
-  projectId: "app-1238f",
-  storageBucket: "app-1238f.appspot.com",
-  messagingSenderId: "12576842624",
-  appId: "1:12576842624:web:92eb40fd8c56a9fc475765",
-  measurementId: "G-N5Q9K9G3JN"
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_DOMAIN",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_BUCKET",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
 };
 
 // Initialize Firebase
@@ -237,55 +236,83 @@ const ImageMatcher = () => {
   }, []);
 
   return (
-    <div className="max-w-4xl mx-auto p-6">
-      <div className="bg-white rounded-lg shadow-lg p-6">
-        <h1 className="text-2xl font-bold mb-6">AR Image Scanner</h1>
+    <div style={{ maxWidth: '800px', margin: '0 auto', padding: '20px' }}>
+      <div style={{ backgroundColor: 'white', borderRadius: '8px', padding: '20px', boxShadow: '0 2px 4px rgba(0, 0, 0, 0.1)' }}>
+        <h1 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '20px', textAlign: 'center' }}>
+          AR Image Scanner
+        </h1>
 
         {error && (
-          <div className="p-4 mb-4 bg-red-100 text-red-700 rounded-lg">
+          <div style={{ 
+            padding: '10px', 
+            backgroundColor: '#fee2e2', 
+            color: '#dc2626', 
+            borderRadius: '4px',
+            marginBottom: '20px' 
+          }}>
             {error}
           </div>
         )}
         
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-          <div className="bg-gray-100 rounded-lg overflow-hidden">
-            <div className="aspect-video relative">
-              {imageUrl && (
+        <div style={{ 
+          display: 'grid', 
+          gridTemplateColumns: '1fr 1fr', 
+          gap: '20px',
+          marginBottom: '20px'
+        }}>
+          <div style={{ 
+            aspectRatio: '16/9',
+            backgroundColor: '#f3f4f6',
+            borderRadius: '8px',
+            overflow: 'hidden'
+          }}>
+            {imageUrl && (
+              <div>
                 <img 
                   src={imageUrl}
                   alt="Reference"
-                  className="w-full h-full object-cover"
+                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 />
-              )}
-            </div>
-            <p className="text-center mt-2 p-2">Reference Image</p>
+                <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
+              </div>
+            )}
           </div>
           
-          <div className="bg-gray-100 rounded-lg overflow-hidden">
-            <div className="aspect-video relative">
+          <div style={{ 
+            aspectRatio: '16/9',
+            backgroundColor: '#f3f4f6',
+            borderRadius: '8px',
+            overflow: 'hidden'
+          }}>
+            <div>
               <video
                 ref={videoRef}
-                className="w-full h-full object-cover"
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 autoPlay
                 playsInline
               />
               <canvas
                 ref={canvasRef}
-                className="hidden"
+                style={{ display: 'none' }}
               />
+              <p style={{ textAlign: 'center', marginTop: '8px' }}>Camera Feed</p>
             </div>
-            <p className="text-center mt-2 p-2">Camera Feed</p>
           </div>
         </div>
 
-        <div className="flex gap-2 mb-4">
+        <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', justifyContent: 'center' }}>
           <button
             onClick={isStreaming ? stopCamera : startCamera}
-            className={`px-4 py-2 rounded text-white ${
-              isStreaming 
-                ? 'bg-red-600 hover:bg-red-700' 
-                : 'bg-blue-600 hover:bg-blue-700'
-            } transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: isStreaming ? '#dc2626' : '#2563eb',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              opacity: !imageUrl ? '0.5' : '1',
+              pointerEvents: !imageUrl ? 'none' : 'auto'
+            }}
             disabled={!imageUrl}
           >
             {isStreaming ? "Stop Camera" : "Start Camera"}
@@ -293,14 +320,20 @@ const ImageMatcher = () => {
         </div>
 
         {matchScore !== null && (
-          <div className="p-4 bg-gray-100 rounded-lg">
-            <h3 className="text-lg font-semibold mb-2">
+          <div style={{
+            textAlign: 'center',
+            padding: '16px',
+            backgroundColor: '#f3f4f6',
+            borderRadius: '8px',
+            marginTop: '20px'
+          }}>
+            <h3 style={{ fontSize: '20px', fontWeight: '600', marginBottom: '8px' }}>
               Match Score: {matchScore.toFixed(1)}%
             </h3>
-            <p className={`
-              ${matchScore > 70 ? 'text-green-600' : 
-                matchScore > 40 ? 'text-yellow-600' : 'text-red-600'}
-            `}>
+            <p style={{ 
+              color: matchScore > 70 ? '#059669' : matchScore > 40 ? '#d97706' : '#dc2626',
+              fontSize: '16px'
+            }}>
               {matchScore > 70 ? "It's a match!" : 
                matchScore > 40 ? "Partial match" : "No match found"}
             </p>
