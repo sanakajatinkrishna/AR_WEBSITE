@@ -2,6 +2,7 @@ import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
 
+// Firebase Configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -12,17 +13,19 @@ const firebaseConfig = {
   measurementId: "G-N5Q9K9G3JN"
 };
 
+// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const App = () => {
+  // Get content key directly from URL
   const contentKey = new URLSearchParams(window.location.search).get('key');
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const animationFrameRef = useRef(null);
-  const referenceImageRef = useRef(null);
+  const trackedPositionRef = useRef({ x: 50, y: 50 });
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
@@ -31,31 +34,8 @@ const App = () => {
   const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [isCanvasDetected, setIsCanvasDetected] = useState(false);
-  const [matchScore, setMatchScore] = useState(0);
 
-  const rgbToHsv = (r, g, b) => {
-    r /= 255; g /= 255; b /= 255;
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const diff = max - min;
-    
-    let h = 0;
-    if (diff !== 0) {
-      if (max === r) h = ((g - b) / diff) % 6;
-      else if (max === g) h = (b - r) / diff + 2;
-      else h = (r - g) / diff + 4;
-    }
-    h *= 60;
-    if (h < 0) h += 360;
-    
-    const s = max === 0 ? 0 : diff / max;
-    const v = max;
-    
-    return [h, s * 100, v * 100];
-  };
-
-
-
+  // Load content based on key
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -90,14 +70,6 @@ const App = () => {
         setImageUrl(data.imageUrl);
         setDebugInfo('Content loaded - Please show image');
 
-        // Load reference image
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        img.onload = () => {
-          referenceImageRef.current = img;
-        };
-        img.src = data.imageUrl;
-
       } catch (error) {
         console.error('Content loading error:', error);
         setDebugInfo(`Error: ${error.message}`);
@@ -106,6 +78,70 @@ const App = () => {
 
     loadContent();
   }, [contentKey]);
+
+  const detectCanvas = useCallback((imageData) => {
+    const width = imageData.width;
+    const height = imageData.height;
+    
+    let totalR = 0, totalG = 0, totalB = 0;
+    let samples = 0;
+
+    for (let y = 0; y < height; y += 4) {
+      for (let x = 0; x < width; x += 4) {
+        const i = (y * width + x) * 4;
+        totalR += imageData.data[i];
+        totalG += imageData.data[i + 1];
+        totalB += imageData.data[i + 2];
+        samples++;
+      }
+    }
+
+    const avgR = totalR / samples;
+    const avgG = totalG / samples;
+    const avgB = totalB / samples;
+
+    const hasContent = (avgR > 30 || avgG > 30 || avgB > 30) && 
+                      (avgR < 240 || avgG < 240 || avgB < 240);
+
+    if (hasContent) {
+      let left = width, right = 0, top = height, bottom = 0;
+
+      for (let y = 0; y < height; y += 2) {
+        for (let x = 0; x < width; x += 2) {
+          const i = (y * width + x) * 4;
+          const r = imageData.data[i];
+          const g = imageData.data[i + 1];
+          const b = imageData.data[i + 2];
+
+          if (Math.abs(r - avgR) > 20 || Math.abs(g - avgG) > 20 || Math.abs(b - avgB) > 20) {
+            left = Math.min(left, x);
+            right = Math.max(right, x);
+            top = Math.min(top, y);
+            bottom = Math.max(bottom, y);
+          }
+        }
+      }
+
+      const centerX = (left + right) / 2;
+      const centerY = (top + bottom) / 2;
+      const objWidth = right - left;
+      const objHeight = bottom - top;
+
+      const posX = (centerX / width) * 100;
+      const posY = (centerY / height) * 100;
+
+      trackedPositionRef.current.x = trackedPositionRef.current.x * 0.8 + posX * 0.2;
+      trackedPositionRef.current.y = trackedPositionRef.current.y * 0.8 + posY * 0.2;
+
+      return {
+        position: { x: trackedPositionRef.current.x, y: trackedPositionRef.current.y },
+        size: { width: objWidth, height: objHeight },
+        detected: true
+      };
+    }
+
+    return { detected: false };
+  }, []);
 
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
@@ -135,11 +171,11 @@ const App = () => {
     }
   }, [videoUrl, isVideoPlaying]);
 
-const processFrame = useCallback(() => {
+  const processFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
-    if (!video || !canvas || !referenceImageRef.current) {
+    if (!video || !canvas) {
       animationFrameRef.current = requestAnimationFrame(processFrame);
       return;
     }
@@ -154,44 +190,30 @@ const processFrame = useCallback(() => {
       canvas.height = video.videoHeight;
     }
     
-    const compareImages = (imgData1, imgData2) => {
-      // Same compareImages implementation as before
-    };
-    
-    // Draw and get current frame
     context.drawImage(video, 0, 0);
-    const currentFrame = context.getImageData(0, 0, canvas.width, canvas.height);
     
-    // Draw and get reference frame
-    context.drawImage(referenceImageRef.current, 0, 0, canvas.width, canvas.height);
-    const referenceFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+    const centerWidth = canvas.width * 0.5;
+    const centerHeight = canvas.height * 0.5;
+    const x = (canvas.width - centerWidth) / 2;
+    const y = (canvas.height - centerHeight) / 2;
     
-    // Compare images
-    const score = compareImages(currentFrame, referenceFrame);
-    setMatchScore(score);
-
-    if (score > 70) {
+    const imageData = context.getImageData(x, y, centerWidth, centerHeight);
+    const result = detectCanvas(imageData);
+    
+    if (result.detected) {
+      setCanvasPosition(result.position);
+      setCanvasSize(result.size);
+      
       if (!isCanvasDetected) {
         setIsCanvasDetected(true);
         startVideo();
       }
-      
-      const centerX = canvas.width / 2;
-      const centerY = canvas.height / 2;
-      setCanvasPosition({
-        x: (centerX / canvas.width) * 100,
-        y: (centerY / canvas.height) * 100
-      });
-      setCanvasSize({
-        width: canvas.width * 0.8,
-        height: canvas.height * 0.8
-      });
     } else if (isCanvasDetected) {
       setIsCanvasDetected(false);
     }
 
     animationFrameRef.current = requestAnimationFrame(processFrame);
-  }, [isCanvasDetected, startVideo]);
+  }, [detectCanvas, startVideo, isCanvasDetected]);
 
   useEffect(() => {
     let isComponentMounted = true;
@@ -327,7 +349,7 @@ const processFrame = useCallback(() => {
         style={styles.canvas}
       />
 
-      {videoUrl && isCanvasDetected && (
+      {videoUrl && (
         <video
           ref={overlayVideoRef}
           style={styles.overlayVideo}
@@ -345,7 +367,6 @@ const processFrame = useCallback(() => {
         <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
         <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
-        <div>Match Score: {matchScore.toFixed(1)}%</div>
       </div>
 
       {imageUrl && (
