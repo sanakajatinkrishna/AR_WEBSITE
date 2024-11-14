@@ -1,67 +1,54 @@
-import React, { useRef, useState, useCallback, useEffect } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
+import React, { useState, useRef, useEffect } from 'react';
 
-const firebaseConfig = {
-  apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
-  authDomain: "app-1238f.firebaseapp.com",
-  projectId: "app-1238f",
-  storageBucket: "app-1238f.appspot.com",
-  messagingSenderId: "12576842624",
-  appId: "1:12576842624:web:92eb40fd8c56a9fc475765",
-  measurementId: "G-N5Q9K9G3JN"
-};
-
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-
-const App = () => {
-  const contentKey = new URLSearchParams(window.location.search).get('key');
-
+const ImageMatcher = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const overlayVideoRef = useRef(null);
-  const referenceImageRef = useRef(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [matchScore, setMatchScore] = useState(null);
+  const [error, setError] = useState(null);
+  const frameIntervalRef = useRef(null);
 
-  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
-  const [debugInfo, setDebugInfo] = useState('Initializing...');
-  const [videoUrl, setVideoUrl] = useState(null);
-  const [imageUrl, setImageUrl] = useState(null);
-  const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
-  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
-  const [isCanvasDetected, setIsCanvasDetected] = useState(false);
-  const [matchScore, setMatchScore] = useState(0);
-  const [matchStatus, setMatchStatus] = useState('');
+  // Import reference image
+  const referenceImage = require('./assets/images/reference.jpg');
 
-  const startVideo = useCallback(async () => {
-    if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
-
-    try {
-      overlayVideoRef.current.src = videoUrl;
-      overlayVideoRef.current.muted = false;
-      await overlayVideoRef.current.play();
-      setIsVideoPlaying(true);
-      setDebugInfo('Video playing with sound');
-    } catch (error) {
-      console.error('Video playback error:', error);
-      setDebugInfo('Click anywhere to play video with sound');
-      
-      const playOnClick = () => {
-        if (overlayVideoRef.current) {
-          overlayVideoRef.current.play()
-            .then(() => {
-              setIsVideoPlaying(true);
-              setDebugInfo('Video playing with sound');
-              document.removeEventListener('click', playOnClick);
-            })
-            .catch(console.error);
-        }
-      };
-      document.addEventListener('click', playOnClick);
+  // Stop camera stream
+  const stopCamera = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+      setIsStreaming(false);
+      if (frameIntervalRef.current) {
+        clearInterval(frameIntervalRef.current);
+        frameIntervalRef.current = null;
+      }
     }
-  }, [videoUrl, isVideoPlaying]);
+  };
 
-  const rgbToHsv = useCallback((r, g, b) => {
+  // Start camera stream
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        } 
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        setIsStreaming(true);
+        setError(null);
+        // Start automatic matching when camera starts
+        frameIntervalRef.current = setInterval(captureFrame, 500);
+      }
+    } catch (err) {
+      setError('Unable to access camera. Please ensure you have granted camera permissions.');
+      console.error('Error accessing camera:', err);
+    }
+  };
+
+  // Convert RGB to HSV for better comparison
+  const rgbToHsv = (r, g, b) => {
     r /= 255;
     g /= 255;
     b /= 255;
@@ -91,9 +78,10 @@ const App = () => {
     }
 
     return [h, s * 100, v * 100];
-  }, []);
+  };
 
-  const compareImages = useCallback((imgData1, imgData2) => {
+  // Compare images using HSV color space and regional comparison
+  const compareImages = (imgData1, imgData2) => {
     const width = imgData1.width;
     const height = imgData1.height;
     const blockSize = 8;
@@ -154,10 +142,11 @@ const App = () => {
 
     const rawPercentage = (matchCount / totalBlocks) * 100;
     return Math.min(100, rawPercentage * 1.5);
-  }, [rgbToHsv]);
+  };
 
-  const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !referenceImageRef.current) return;
+  // Capture and compare frame
+  const captureFrame = () => {
+    if (!videoRef.current || !canvasRef.current || !isStreaming) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -165,260 +154,93 @@ const App = () => {
 
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    
+
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(referenceImageRef.current, 0, 0, canvas.width, canvas.height);
-    const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
-      
-    const score = compareImages(capturedFrame, referenceData);
-    setMatchScore(score);
+    const refImg = new Image();
+    refImg.src = referenceImage;
     
-    if (score > 70) {
-      setMatchStatus('Match Found!');
-      setIsCanvasDetected(true);
-      startVideo();
+    refImg.onload = () => {
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(refImg, 0, 0, canvas.width, canvas.height);
+      const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
       
-      const centerX = canvas.width / 2;
-      const centerY = canvas.height / 2;
-      setCanvasPosition({
-        x: (centerX / canvas.width) * 100,
-        y: (centerY / canvas.height) * 100
-      });
-      setCanvasSize({
-        width: canvas.width * 0.8,
-        height: canvas.height * 0.8
-      });
-    } else {
-      setMatchStatus('No Match Yet');
-    }
-  }, [compareImages, startVideo]);
-
-  useEffect(() => {
-    const loadContent = async () => {
-      if (!contentKey) {
-        setDebugInfo('No content key found');
-        return;
-      }
-
-      try {
-        setDebugInfo('Verifying content...');
-        const arContentRef = collection(db, 'arContent');
-        const q = query(
-          arContentRef,
-          where('contentKey', '==', contentKey),
-          where('isActive', '==', true)
-        );
-
-        const snapshot = await getDocs(q);
-        
-        if (snapshot.empty) {
-          setDebugInfo('Invalid or inactive content');
-          return;
-        }
-
-        const doc = snapshot.docs[0];
-        const data = doc.data();
-
-        setVideoUrl(data.videoUrl);
-        setImageUrl(data.imageUrl);
-        setDebugInfo('Content loaded - Please show image');
-
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        img.onload = () => {
-          referenceImageRef.current = img;
-        };
-        img.src = data.imageUrl;
-
-      } catch (error) {
-        console.error('Content loading error:', error);
-        setDebugInfo(`Error: ${error.message}`);
-      }
+      const score = compareImages(capturedFrame, referenceData);
+      setMatchScore(score);
     };
-
-    loadContent();
-  }, [contentKey]);
-
-  useEffect(() => {
-    let isComponentMounted = true;
-    let currentStream = null;
-
-    const startCamera = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: 'environment',
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30 }
-          }
-        });
-
-        if (!isComponentMounted) return;
-
-        const videoTrack = stream.getVideoTracks()[0];
-        await videoTrack.applyConstraints({
-          advanced: [
-            { exposureMode: "continuous" },
-            { focusMode: "continuous" },
-            { whiteBalanceMode: "continuous" }
-          ]
-        }).catch(() => {});
-
-        currentStream = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-          
-          if (isComponentMounted) {
-            setDebugInfo('Camera ready - Show image');
-          }
-        }
-      } catch (error) {
-        console.error('Camera error:', error);
-        if (isComponentMounted) {
-          setDebugInfo(`Camera error: ${error.message}`);
-        }
-      }
-    };
-
-    if (videoUrl) {
-      startCamera();
-    }
-
-    return () => {
-      isComponentMounted = false;
-      if (currentStream) {
-        currentStream.getTracks().forEach(track => track.stop());
-      }
-    };
-  }, [videoUrl]);
-
-  const styles = {
-    container: {
-      position: 'fixed',
-      inset: 0,
-      backgroundColor: 'black'
-    },
-    video: {
-      position: 'absolute',
-      width: '100%',
-      height: '100%',
-      objectFit: 'cover'
-    },
-    canvas: {
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      width: '100%',
-      height: '100%',
-      display: 'none'
-    },
-    overlayVideo: {
-      position: 'absolute',
-      top: `${canvasPosition.y}%`,
-      left: `${canvasPosition.x}%`,
-      transform: 'translate(-50%, -50%)',
-      width: `${Math.min(canvasSize.width * 1.2, 40)}vw`,
-      height: `${Math.min(canvasSize.height * 1.2, 40)}vh`,
-      objectFit: 'contain',
-      zIndex: 20,
-      transition: 'all 0.1s ease-out'
-    },
-    button: {
-      position: 'absolute',
-      bottom: '100px',
-      left: '50%',
-      transform: 'translateX(-50%)',
-      padding: '8px 16px',
-      backgroundColor: '#2563eb',
-      color: 'white',
-      border: 'none',
-      borderRadius: '4px',
-      cursor: 'pointer',
-      zIndex: 30
-    },
-    debugInfo: {
-      position: 'absolute',
-      top: 20,
-      left: 20,
-      backgroundColor: 'rgba(0,0,0,0.7)',
-      color: 'white',
-      padding: '10px',
-      borderRadius: '5px',
-      zIndex: 30
-    },
-    imagePreview: {
-      position: 'absolute',
-      bottom: 20,
-      right: 20,
-      backgroundColor: 'rgba(0,0,0,0.7)',
-      padding: '10px',
-      borderRadius: '5px',
-      zIndex: 30
-    },
-    previewImage: {
-      width: '150px',
-      height: '150px',
-      objectFit: 'cover',
-      borderRadius: '5px'
-    }
   };
 
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopCamera();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // We intentionally omit stopCamera to avoid recreating the cleanup function
+
   return (
-    <div style={styles.container}>
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
-        style={styles.video}
-      />
-
-      <canvas
-        ref={canvasRef}
-        style={styles.canvas}
-      />
-
-      {videoUrl && isCanvasDetected && (
-        <video
-          ref={overlayVideoRef}
-          style={styles.overlayVideo}
-          autoPlay
-          playsInline
-          loop
-          muted={false}
-          controls={false}
-        />
-      )}
-
-      <button 
-        onClick={captureFrame}
-        style={styles.button}
-      >
-        Match Image
-      </button>
-
-      <div style={styles.debugInfo}>
-        <div>Status: {debugInfo}</div>
-        <div>Key: {contentKey || 'Not found'}</div>
-        <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
-        <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
-        <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
-        <div>Match Score: {matchScore.toFixed(1)}%</div>
-        {matchStatus && <div>Match Status: {matchStatus}</div>}
+    <div className="max-w-4xl mx-auto p-5">
+      <div className="mb-5">
+        <h1 className="flex items-center gap-3 text-2xl font-bold">
+          Automatic Image Matcher
+        </h1>
       </div>
 
-      {imageUrl && (
-        <div style={styles.imagePreview}>
-          <img src={imageUrl} alt="Target" style={styles.previewImage} />
+      <div>
+        {error && (
+          <div className="p-3 bg-red-100 text-red-600 rounded-md mb-5">
+            {error}
+          </div>
+        )}
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
+          <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden">
+            <img 
+              src={referenceImage}
+              alt="Reference"
+              className="w-full h-full object-cover"
+            />
+            <p className="text-center mt-2">Reference Image</p>
+          </div>
+          <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden">
+            <video
+              ref={videoRef}
+              className="w-full h-full object-cover"
+              autoPlay
+              playsInline
+            />
+            <canvas
+              ref={canvasRef}
+              className="hidden"
+            />
+            <p className="text-center mt-2">Camera Feed</p>
+          </div>
         </div>
-      )}
+
+        <div className="flex gap-3 mb-5">
+          <button
+            onClick={isStreaming ? stopCamera : startCamera}
+            className={`px-4 py-2 text-white rounded-md cursor-pointer ${
+              isStreaming ? 'bg-red-600' : 'bg-blue-600'
+            }`}
+          >
+            {isStreaming ? "Stop Camera" : "Start Camera"}
+          </button>
+        </div>
+
+        {matchScore !== null && (
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <h3 className="mb-2 text-lg font-semibold">Match Score: {matchScore.toFixed(1)}%</h3>
+            <p className="text-gray-600">
+              {matchScore > 70 ? "It's a match!" : 
+               matchScore > 40 ? "Partial match" : "No match found"}
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   );
 };
 
-export default App;
+export default ImageMatcher;
