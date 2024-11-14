@@ -38,7 +38,6 @@ const ImageMatcher = () => {
         videoRef.current.srcObject = stream;
         setIsStreaming(true);
         setError(null);
-        // Start automatic matching when camera starts
         frameIntervalRef.current = setInterval(captureFrame, 500);
       }
     } catch (err) {
@@ -177,52 +176,60 @@ const ImageMatcher = () => {
       stopCamera();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // We intentionally omit stopCamera to avoid recreating the cleanup function
+  }, []);
 
   return (
     <div className="max-w-4xl mx-auto p-5">
       <div className="mb-5">
-        <h1 className="flex items-center gap-3 text-2xl font-bold">
+        <h1 className="text-2xl font-bold">
           Automatic Image Matcher
         </h1>
       </div>
 
       <div>
         {error && (
-          <div className="p-3 bg-red-100 text-red-600 rounded-md mb-5">
+          <div className="p-4 mb-5 bg-red-100 text-red-600 rounded-lg">
             {error}
           </div>
         )}
         
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
-          <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden">
-            <img 
-              src={referenceImage}
-              alt="Reference"
-              className="w-full h-full object-cover"
-            />
-            <p className="text-center mt-2">Reference Image</p>
+          <div className="relative bg-gray-100 rounded-lg overflow-hidden">
+            <div className="aspect-video">
+              <img 
+                src={referenceImage}
+                alt="Reference"
+                className="w-full h-full object-cover"
+              />
+            </div>
+            <div className="absolute bottom-0 left-0 right-0 p-2 text-center bg-gray-800 bg-opacity-50 text-white">
+              Reference Image
+            </div>
           </div>
-          <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden">
-            <video
-              ref={videoRef}
-              className="w-full h-full object-cover"
-              autoPlay
-              playsInline
-            />
-            <canvas
-              ref={canvasRef}
-              className="hidden"
-            />
-            <p className="text-center mt-2">Camera Feed</p>
+          <div className="relative bg-gray-100 rounded-lg overflow-hidden">
+            <div className="aspect-video">
+              <video
+                ref={videoRef}
+                className="w-full h-full object-cover"
+                autoPlay
+                playsInline
+              />
+              <canvas
+                ref={canvasRef}
+                className="hidden"
+              />
+            </div>
+            <div className="absolute bottom-0 left-0 right-0 p-2 text-center bg-gray-800 bg-opacity-50 text-white">
+              Camera Feed
+            </div>
           </div>
         </div>
 
-        <div className="flex gap-3 mb-5">
+        <div className="flex gap-4 mb-5">
           <button
             onClick={isStreaming ? stopCamera : startCamera}
-            className={`px-4 py-2 text-white rounded-md cursor-pointer ${
-              isStreaming ? 'bg-red-600' : 'bg-blue-600'
+            className={`px-6 py-3 rounded-lg text-white font-medium transition-colors ${
+              isStreaming ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
             }`}
           >
             {isStreaming ? "Stop Camera" : "Start Camera"}
@@ -230,12 +237,15 @@ const ImageMatcher = () => {
         </div>
 
         {matchScore !== null && (
-          <div className="p-4 bg-gray-100 rounded-lg">
-            <h3 className="mb-2 text-lg font-semibold">Match Score: {matchScore.toFixed(1)}%</h3>
-            <p className="text-gray-600">
+          <div className="p-6 bg-gray-100 rounded-lg">
+            <h3 className="text-xl font-semibold mb-3">Match Score: {matchScore.toFixed(1)}%</h3>
+            <div className={`text-lg ${
+              matchScore > 70 ? 'text-green-600' : 
+              matchScore > 40 ? 'text-yellow-600' : 'text-red-600'
+            }`}>
               {matchScore > 70 ? "It's a match!" : 
                matchScore > 40 ? "Partial match" : "No match found"}
-            </p>
+            </div>
           </div>
         )}
       </div>
