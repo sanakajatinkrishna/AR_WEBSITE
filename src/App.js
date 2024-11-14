@@ -25,10 +25,9 @@ const ImageMatcher = () => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(0);
   const [error, setError] = useState(null);
-  const referenceImageRef = useRef(null);
+  const [referenceImage, setReferenceImage] = useState(null);
   const [imageUrl, setImageUrl] = useState(null);
 
-  // Load the reference image from Firebase
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const key = urlParams.get('key');
@@ -36,31 +35,34 @@ const ImageMatcher = () => {
     if (key) {
       const q = query(
         collection(db, 'arContent'),
-        where('contentKey', '==', key),
-        where('isActive', '==', true)
+        where('contentKey', '==', key)
       );
 
       const unsubscribe = onSnapshot(q, (snapshot) => {
         if (!snapshot.empty) {
           const doc = snapshot.docs[0];
           const data = doc.data();
-          const url = data.imageUrl;
-          setImageUrl(url);
+          console.log('Firebase data:', data);
+          setImageUrl(data.imageUrl);
 
-          // Load the reference image
           const img = new Image();
-          img.crossOrigin = "anonymous";
+          img.crossOrigin = 'Anonymous';
           img.onload = () => {
-            referenceImageRef.current = img;
+            console.log('Reference image loaded');
+            setReferenceImage(img);
             setError(null);
           };
-          img.onerror = () => {
+          img.onerror = (e) => {
+            console.error('Error loading image:', e);
             setError('Failed to load reference image');
           };
-          img.src = url;
+          img.src = data.imageUrl;
         } else {
-          setError('No active content found for this key');
+          setError('No content found for this key');
         }
+      }, (err) => {
+        console.error('Error fetching content:', err);
+        setError('Failed to fetch content');
       });
 
       return () => unsubscribe();
@@ -71,14 +73,14 @@ const ImageMatcher = () => {
 
   const startCamera = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
           facingMode: 'environment',
           width: { ideal: 1280 },
           height: { ideal: 720 }
-        } 
+        }
       });
-      
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.onloadedmetadata = () => {
@@ -88,6 +90,7 @@ const ImageMatcher = () => {
         };
       }
     } catch (err) {
+      console.error('Camera error:', err);
       setError('Unable to access camera. Please ensure you have granted camera permissions.');
     }
   };
@@ -102,7 +105,6 @@ const ImageMatcher = () => {
     }
   };
 
-  // RGB to HSV conversion
   const rgbToHsv = (r, g, b) => {
     r /= 255;
     g /= 255;
@@ -118,17 +120,10 @@ const ImageMatcher = () => {
 
     if (diff !== 0) {
       switch (max) {
-        case r:
-          h = 60 * ((g - b) / diff + (g < b ? 6 : 0));
-          break;
-        case g:
-          h = 60 * ((b - r) / diff + 2);
-          break;
-        case b:
-          h = 60 * ((r - g) / diff + 4);
-          break;
-        default:
-          break;
+        case r: h = 60 * ((g - b) / diff + (g < b ? 6 : 0)); break;
+        case g: h = 60 * ((b - r) / diff + 2); break;
+        case b: h = 60 * ((r - g) / diff + 4); break;
+        default: break;
       }
     }
 
@@ -136,8 +131,9 @@ const ImageMatcher = () => {
   };
 
   const compareImages = useCallback((imgData1, imgData2) => {
-    const width = Math.min(imgData1.width, imgData2.width);
-    const height = Math.min(imgData1.height, imgData2.height);
+    console.log('Comparing images with dimensions:', imgData1.width, imgData2.width);
+    const width = imgData1.width;
+    const height = imgData1.height;
     const blockSize = 8;
     const hueWeight = 0.5;
     const satWeight = 0.3;
@@ -198,19 +194,20 @@ const ImageMatcher = () => {
     return Math.min(100, rawPercentage * 1.5);
   }, []);
 
-  const captureAndCompare = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !referenceImageRef.current) return;
+  const captureFrame = useCallback(() => {
+    if (!videoRef.current || !canvasRef.current || !referenceImage) {
+      console.log('Missing required elements for capture');
+      return;
+    }
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
-    // Set canvas dimensions to match video
+    // Set up the main canvas for video capture
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-
-    // Draw the current video frame
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    context.drawImage(video, 0, 0);
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
     // Create a temporary canvas for the reference image
@@ -218,30 +215,28 @@ const ImageMatcher = () => {
     tempCanvas.width = canvas.width;
     tempCanvas.height = canvas.height;
     const tempContext = tempCanvas.getContext('2d');
-    
-    // Draw the reference image at the same size as the video
-    tempContext.drawImage(referenceImageRef.current, 0, 0, canvas.width, canvas.height);
-    const referenceData = tempContext.getImageData(0, 0, canvas.width, canvas.height);
+    tempContext.drawImage(referenceImage, 0, 0, tempCanvas.width, tempCanvas.height);
+    const referenceData = tempContext.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
 
-    // Compare the images
+    // Compare and update score
     const score = compareImages(capturedFrame, referenceData);
+    console.log('Match score:', score);
     setMatchScore(score);
-  }, [compareImages]);
+  }, [compareImages, referenceImage]);
 
-  // Set up continuous comparison
   useEffect(() => {
     let intervalId;
-    if (isStreaming && referenceImageRef.current) {
-      intervalId = setInterval(captureAndCompare, 100);
+    if (isStreaming && referenceImage) {
+      console.log('Starting capture interval');
+      intervalId = setInterval(captureFrame, 100);
     }
     return () => {
       if (intervalId) {
         clearInterval(intervalId);
       }
     };
-  }, [isStreaming, captureAndCompare]);
+  }, [isStreaming, captureFrame, referenceImage]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopCamera();
@@ -283,7 +278,6 @@ const ImageMatcher = () => {
           gap: '20px',
           marginBottom: '20px' 
         }}>
-          {/* Reference Image */}
           <div style={{ 
             width: '100%',
             aspectRatio: '16/9',
@@ -317,7 +311,6 @@ const ImageMatcher = () => {
             </p>
           </div>
           
-          {/* Camera Feed */}
           <div style={{ 
             width: '100%',
             aspectRatio: '16/9',
@@ -354,7 +347,6 @@ const ImageMatcher = () => {
           </div>
         </div>
 
-        {/* Controls and Match Display */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px' }}>
           <button
             onClick={isStreaming ? stopCamera : startCamera}
@@ -364,13 +356,13 @@ const ImageMatcher = () => {
               color: 'white',
               border: 'none',
               borderRadius: '8px',
-              cursor: imageUrl ? 'pointer' : 'not-allowed',
-              opacity: imageUrl ? '1' : '0.5',
+              cursor: referenceImage ? 'pointer' : 'not-allowed',
+              opacity: referenceImage ? '1' : '0.5',
               fontWeight: '600',
               fontSize: '16px',
               transition: 'all 0.2s ease'
             }}
-            disabled={!imageUrl}
+            disabled={!referenceImage}
           >
             {isStreaming ? "Stop Camera" : "Start Camera"}
           </button>
