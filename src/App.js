@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp, getApps } from 'firebase/app';
 import { getFirestore, collection, query, where, onSnapshot } from 'firebase/firestore';
+import { getStorage, ref, getDownloadURL } from 'firebase/storage';
 
 // Firebase configuration
 const firebaseConfig = {
@@ -18,6 +19,7 @@ if (!getApps().length) {
   initializeApp(firebaseConfig);
 }
 const db = getFirestore();
+const storage = getStorage();
 
 const ImageMatcher = () => {
   const videoRef = useRef(null);
@@ -41,24 +43,35 @@ const ImageMatcher = () => {
 
       console.log('Fetching content for key:', key);
 
-      const unsubscribe = onSnapshot(q, (snapshot) => {
+      const unsubscribe = onSnapshot(q, async (snapshot) => {
         if (!snapshot.empty) {
           const doc = snapshot.docs[0];
           const data = doc.data();
           console.log('Fetched data:', data);
-          setImageUrl(data.imageUrl);
-          
-          const img = new Image();
-          img.crossOrigin = "Anonymous";
-          img.src = data.imageUrl;
-          img.onload = () => {
-            console.log('Image loaded successfully');
-            setReferenceImage(img);
-          };
-          img.onerror = (e) => {
-            console.error('Error loading image:', e);
-            setError('Failed to load reference image');
-          };
+
+          try {
+            // Get the actual download URL from Firebase Storage
+            const url = await getDownloadURL(ref(storage, data.imageUrl));
+            console.log('Got download URL:', url);
+            setImageUrl(url);
+            
+            // Create and load image with the download URL
+            const img = new Image();
+            img.crossOrigin = "anonymous";
+            img.onload = () => {
+              console.log('Image loaded successfully');
+              setReferenceImage(img);
+              setError(null);
+            };
+            img.onerror = (e) => {
+              console.error('Error loading image:', e);
+              setError('Failed to load reference image');
+            };
+            img.src = url;
+          } catch (err) {
+            console.error('Error getting download URL:', err);
+            setError('Failed to load image URL');
+          }
         } else {
           console.log('No content found for key:', key);
           setError('No active content found for this key');
@@ -204,14 +217,7 @@ const ImageMatcher = () => {
   }, []);
 
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !referenceImage) {
-      console.log('Missing required refs for capture', {
-        video: !!videoRef.current,
-        canvas: !!canvasRef.current,
-        reference: !!referenceImage
-      });
-      return;
-    }
+    if (!videoRef.current || !canvasRef.current || !referenceImage) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -228,26 +234,24 @@ const ImageMatcher = () => {
     const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
     
     const score = compareImages(capturedFrame, referenceData);
-    console.log('Match score:', score);
     setMatchScore(score);
   }, [compareImages, referenceImage]);
 
+  // Set up continuous comparison
   useEffect(() => {
     let intervalId;
-    
     if (isStreaming && referenceImage) {
-      console.log('Starting capture interval');
-      intervalId = setInterval(captureFrame, 500);
+      // Run comparison every 100ms for more frequent updates
+      intervalId = setInterval(captureFrame, 100);
     }
-    
     return () => {
       if (intervalId) {
-        console.log('Cleaning up capture interval');
         clearInterval(intervalId);
       }
     };
   }, [isStreaming, captureFrame, referenceImage]);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopCamera();
@@ -360,8 +364,8 @@ const ImageMatcher = () => {
           </div>
         </div>
 
-        {/* Camera Control */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px' }}>
+          {/* Camera Control Button */}
           <button
             onClick={isStreaming ? stopCamera : startCamera}
             style={{
@@ -381,36 +385,35 @@ const ImageMatcher = () => {
             {isStreaming ? "Stop Camera" : "Start Camera"}
           </button>
 
-          {/* Match Percentage Text */}
-          {matchScore !== null && (
-            <div style={{
-              textAlign: 'center',
-              padding: '16px',
-              backgroundColor: '#f3f4f6',
-              borderRadius: '8px',
-              width: '100%',
-              maxWidth: '300px'
+          {/* Match Percentage Display */}
+          <div style={{
+            textAlign: 'center',
+            padding: '16px',
+            backgroundColor: '#f3f4f6',
+            borderRadius: '8px',
+            width: '100%',
+            maxWidth: '300px',
+            opacity: isStreaming ? '1' : '0.5'
+          }}>
+            <h3 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '8px' }}>
+              Match Percentage
+            </h3>
+            <p style={{ 
+              fontSize: '36px', 
+              fontWeight: 'bold',
+              color: matchScore > 70 ? '#059669' : matchScore > 40 ? '#d97706' : '#dc2626'
             }}>
-              <h3 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '8px' }}>
-                Match Percentage
-              </h3>
-              <p style={{ 
-                fontSize: '36px', 
-                fontWeight: 'bold',
-                color: matchScore > 70 ? '#059669' : matchScore > 40 ? '#d97706' : '#dc2626'
-              }}>
-                {matchScore.toFixed(1)}%
-              </p>
-              <p style={{ 
-                marginTop: '8px',
-                color: matchScore > 70 ? '#065f46' : matchScore > 40 ? '#92400e' : '#991b1b',
-                fontWeight: '500'
-              }}>
-                {matchScore > 70 ? "It's a match!" : 
-                 matchScore > 40 ? "Partial match" : "No match found"}
-              </p>
-            </div>
-          )}
+              {matchScore !== null ? `${matchScore.toFixed(1)}%` : '0%'}
+            </p>
+            <p style={{ 
+              marginTop: '8px',
+              color: matchScore > 70 ? '#065f46' : matchScore > 40 ? '#92400e' : '#991b1b',
+              fontWeight: '500'
+            }}>
+              {matchScore > 70 ? "It's a match!" : 
+               matchScore > 40 ? "Partial match" : "No match found"}
+            </p>
+          </div>
         </div>
       </div>
     </div>
