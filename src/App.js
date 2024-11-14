@@ -33,27 +33,6 @@ const App = () => {
   const [isCanvasDetected, setIsCanvasDetected] = useState(false);
   const [matchScore, setMatchScore] = useState(0);
 
-  const rgbToHsv = useCallback((r, g, b) => {
-    r /= 255; g /= 255; b /= 255;
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const diff = max - min;
-    
-    let h = 0;
-    if (diff !== 0) {
-      if (max === r) h = ((g - b) / diff) % 6;
-      else if (max === g) h = (b - r) / diff + 2;
-      else h = (r - g) / diff + 4;
-    }
-    h *= 60;
-    if (h < 0) h += 360;
-    
-    const s = max === 0 ? 0 : diff / max;
-    const v = max;
-    
-    return [h, s * 100, v * 100];
-  }, []);
-
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
@@ -82,6 +61,59 @@ const App = () => {
     }
   }, [videoUrl, isVideoPlaying]);
 
+  const compareImages = useCallback((imgData1, imgData2) => {
+    const width = Math.min(imgData1.width, imgData2.width);
+    const height = Math.min(imgData1.height, imgData2.height);
+    const blockSize = 16;
+    const numBlocksX = Math.floor(width / blockSize);
+    const numBlocksY = Math.floor(height / blockSize);
+    
+    let totalMatch = 0;
+    let totalBlocks = numBlocksX * numBlocksY;
+
+    for (let blockY = 0; blockY < numBlocksY; blockY++) {
+      for (let blockX = 0; blockX < numBlocksX; blockX++) {
+        let blockAvg1 = [0, 0, 0];
+        let blockAvg2 = [0, 0, 0];
+        let pixelCount = 0;
+
+        for (let y = 0; y < blockSize; y++) {
+          for (let x = 0; x < blockSize; x++) {
+            const pixelX = blockX * blockSize + x;
+            const pixelY = blockY * blockSize + y;
+            const i = (pixelY * width + pixelX) * 4;
+
+            blockAvg1[0] += imgData1.data[i];
+            blockAvg1[1] += imgData1.data[i + 1];
+            blockAvg1[2] += imgData1.data[i + 2];
+
+            blockAvg2[0] += imgData2.data[i];
+            blockAvg2[1] += imgData2.data[i + 1];
+            blockAvg2[2] += imgData2.data[i + 2];
+
+            pixelCount++;
+          }
+        }
+
+        blockAvg1 = blockAvg1.map(sum => sum / pixelCount);
+        blockAvg2 = blockAvg2.map(sum => sum / pixelCount);
+
+        const colorDiff = Math.sqrt(
+          Math.pow(blockAvg1[0] - blockAvg2[0], 2) +
+          Math.pow(blockAvg1[1] - blockAvg2[1], 2) +
+          Math.pow(blockAvg1[2] - blockAvg2[2], 2)
+        );
+
+        const threshold = 50;
+        if (colorDiff < threshold) {
+          totalMatch++;
+        }
+      }
+    }
+
+    return (totalMatch / totalBlocks) * 100;
+  }, []);
+
   const processFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -101,68 +133,6 @@ const App = () => {
       canvas.height = video.videoHeight;
     }
 
-    const compareImages = (imgData1, imgData2) => {
-      const width = imgData1.width;
-      const height = imgData1.height;
-      const blockSize = 8;
-      const hueWeight = 0.5;
-      const satWeight = 0.3;
-      const valWeight = 0.2;
-      const hueTolerance = 30;
-      const satTolerance = 30;
-      const valTolerance = 30;
-      
-      let matchCount = 0;
-      let totalBlocks = 0;
-
-      for (let y = 0; y < height; y += blockSize) {
-        for (let x = 0; x < width; x += blockSize) {
-          let blockMatchSum = 0;
-          let blockPixels = 0;
-
-          for (let by = 0; by < blockSize && y + by < height; by++) {
-            for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-              const i = ((y + by) * width + (x + bx)) * 4;
-              
-              const r1 = imgData1.data[i];
-              const g1 = imgData1.data[i + 1];
-              const b1 = imgData1.data[i + 2];
-              
-              const r2 = imgData2.data[i];
-              const g2 = imgData2.data[i + 1];
-              const b2 = imgData2.data[i + 2];
-
-              const hsv1 = rgbToHsv(r1, g1, b1);
-              const hsv2 = rgbToHsv(r2, g2, b2);
-
-              const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
-              const satDiff = Math.abs(hsv1[1] - hsv2[1]);
-              const valDiff = Math.abs(hsv1[2] - hsv2[2]);
-
-              const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
-              const satMatch = satDiff <= satTolerance ? 1 : 0;
-              const valMatch = valDiff <= valTolerance ? 1 : 0;
-
-              const pixelMatchScore = 
-                hueMatch * hueWeight +
-                satMatch * satWeight +
-                valMatch * valWeight;
-
-              blockMatchSum += pixelMatchScore;
-              blockPixels++;
-            }
-          }
-
-          if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
-            matchCount++;
-          }
-          totalBlocks++;
-        }
-      }
-
-      return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
-    };
-    
     context.drawImage(video, 0, 0);
     const currentFrame = context.getImageData(0, 0, canvas.width, canvas.height);
     
@@ -172,7 +142,7 @@ const App = () => {
     const score = compareImages(currentFrame, referenceFrame);
     setMatchScore(score);
 
-    if (score > 70) {
+    if (score > 60) {  // Lowered threshold for better detection
       if (!isCanvasDetected) {
         setIsCanvasDetected(true);
         startVideo();
@@ -193,7 +163,7 @@ const App = () => {
     }
 
     animationFrameRef.current = requestAnimationFrame(processFrame);
-  }, [isCanvasDetected, startVideo, rgbToHsv]);
+  }, [isCanvasDetected, startVideo, compareImages]);
 
   useEffect(() => {
     const loadContent = async () => {
