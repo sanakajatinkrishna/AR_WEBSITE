@@ -1,8 +1,9 @@
+// App.js
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
-import { getStorage, ref, getDownloadURL } from 'firebase/storage';
 
+// Firebase Configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -13,245 +14,134 @@ const firebaseConfig = {
   measurementId: "G-N5Q9K9G3JN"
 };
 
+// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const App = () => {
+  // Get content key directly from URL
   const contentKey = new URLSearchParams(window.location.search).get('key');
+
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const animationFrameRef = useRef(null);
+  const trackedPositionRef = useRef({ x: 50, y: 50 });
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
-  const [referenceImage, setReferenceImage] = useState(null);
   const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [isCanvasDetected, setIsCanvasDetected] = useState(false);
-  const [matchScore, setMatchScore] = useState(0);
 
-  const rgbToHsv = (r, g, b) => {
-    r /= 255;
-    g /= 255;
-    b /= 255;
-
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const diff = max - min;
-
-    let h = 0;
-    let s = max === 0 ? 0 : diff / max;
-    let v = max;
-
-    if (diff !== 0) {
-      switch (max) {
-        case r:
-          h = 60 * ((g - b) / diff + (g < b ? 6 : 0));
-          break;
-        case g:
-          h = 60 * ((b - r) / diff + 2);
-          break;
-        case b:
-          h = 60 * ((r - g) / diff + 4);
-          break;
-        default:
-          break;
-      }
-    }
-
-    return [h, s * 100, v * 100];
-  };
-
-  const compareImages = useCallback((imgData1, imgData2) => {
-    const width = imgData1.width;
-    const height = imgData1.height;
-    const blockSize = 8;
-    const hueWeight = 0.5;
-    const satWeight = 0.3;
-    const valWeight = 0.2;
-    const hueTolerance = 30;
-    const satTolerance = 30;
-    const valTolerance = 30;
-    
-    let matchCount = 0;
-    let totalBlocks = 0;
-
-    for (let y = 0; y < height; y += blockSize) {
-      for (let x = 0; x < width; x += blockSize) {
-        let blockMatchSum = 0;
-        let blockPixels = 0;
-
-        for (let by = 0; by < blockSize && y + by < height; by++) {
-          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-            const i = ((y + by) * width + (x + bx)) * 4;
-            
-            const r1 = imgData1.data[i];
-            const g1 = imgData1.data[i + 1];
-            const b1 = imgData1.data[i + 2];
-            
-            const r2 = imgData2.data[i];
-            const g2 = imgData2.data[i + 1];
-            const b2 = imgData2.data[i + 2];
-
-            const hsv1 = rgbToHsv(r1, g1, b1);
-            const hsv2 = rgbToHsv(r2, g2, b2);
-
-            const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
-            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
-            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
-
-            const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
-            const satMatch = satDiff <= satTolerance ? 1 : 0;
-            const valMatch = valDiff <= valTolerance ? 1 : 0;
-
-            const pixelMatchScore = 
-              hueMatch * hueWeight +
-              satMatch * satWeight +
-              valMatch * valWeight;
-
-            blockMatchSum += pixelMatchScore;
-            blockPixels++;
-          }
-        }
-
-        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
-          matchCount++;
-        }
-        totalBlocks++;
-      }
-    }
-
-    const rawPercentage = (matchCount / totalBlocks) * 100;
-    return Math.min(100, rawPercentage * 1.5);
-  }, []);
-
-  const calculateImagePosition = useCallback((imageData) => {
-    const width = imageData.width;
-    const height = imageData.height;
-    
-    let left = width, right = 0, top = height, bottom = 0;
-    let totalPixels = 0;
-    let sumX = 0, sumY = 0;
-
-    for (let y = 0; y < height; y += 2) {
-      for (let x = 0; x < width; x += 2) {
-        const i = (y * width + x) * 4;
-        const brightness = (
-          imageData.data[i] + 
-          imageData.data[i + 1] + 
-          imageData.data[i + 2]
-        ) / 3;
-
-        if (brightness > 20) {
-          left = Math.min(left, x);
-          right = Math.max(right, x);
-          top = Math.min(top, y);
-          bottom = Math.max(bottom, y);
-          sumX += x;
-          sumY += y;
-          totalPixels++;
-        }
-      }
-    }
-
-    if (totalPixels > 0) {
-      const centerX = sumX / totalPixels;
-      const centerY = sumY / totalPixels;
-      const objWidth = right - left;
-      const objHeight = bottom - top;
-
-      return {
-        position: {
-          x: (centerX / width) * 100,
-          y: (centerY / height) * 100
-        },
-        size: {
-          width: objWidth,
-          height: objHeight
-        }
-      };
-    }
-
-    return null;
-  }, []);
-
-useEffect(() => {
-  const loadContent = async () => {
-    if (!contentKey) {
-      setDebugInfo('No content key found');
-      return;
-    }
-
-    try {
-      console.log('Loading content for key:', contentKey);
-      setDebugInfo('Verifying content...');
-
-      const arContentRef = collection(db, 'arContent');
-      const q = query(
-        arContentRef,
-        where('contentKey', '==', contentKey),
-        where('isActive', '==', true)
-      );
-
-      const snapshot = await getDocs(q);
-      
-      if (snapshot.empty) {
-        setDebugInfo('Invalid or inactive content');
+  // Load content based on key
+  useEffect(() => {
+    const loadContent = async () => {
+      if (!contentKey) {
+        setDebugInfo('No content key found');
         return;
       }
 
-      const doc = snapshot.docs[0];
-      const data = doc.data();
-      
-      // Debug log to check document data
-      console.log('Document data:', data);
-
-      setVideoUrl(data.videoUrl);
-      
       try {
-        // Check if referenceImage exists in document
-        if (!data.referenceImage) {
-          setDebugInfo('Reference image path not found in document');
+        console.log('Loading content for key:', contentKey);
+        setDebugInfo('Verifying content...');
+
+        const arContentRef = collection(db, 'arContent');
+        const q = query(
+          arContentRef,
+          where('contentKey', '==', contentKey),
+          where('isActive', '==', true)
+        );
+
+        const snapshot = await getDocs(q);
+        
+        if (snapshot.empty) {
+          console.log('No content found');
+          setDebugInfo('Invalid or inactive content');
           return;
         }
 
-        const storage = getStorage();
-        const imageRef = ref(storage, `images/${data.referenceImage}`);
-        const imageUrl = await getDownloadURL(imageRef);
-        
-        const img = new Image();
-        img.crossOrigin = "anonymous";
-        
-        img.onload = () => {
-          setReferenceImage(img);
-          setDebugInfo('Content loaded - Please show image');
-        };
-        
-        img.onerror = (error) => {
-          console.error('Error loading reference image:', error);
-          setDebugInfo(`Error loading image: ${error.message}`);
-        };
+        const doc = snapshot.docs[0];
+        const data = doc.data();
+        console.log('Content found:', data);
 
-        img.src = imageUrl;
-      } catch (storageError) {
-        console.error('Storage error details:', storageError);
-        setDebugInfo(`Storage error: ${storageError.message}`);
+        setVideoUrl(data.videoUrl);
+        setDebugInfo('Content loaded - Please show image');
+
+      } catch (error) {
+        console.error('Content loading error:', error);
+        setDebugInfo(`Error: ${error.message}`);
+      }
+    };
+
+    loadContent();
+  }, [contentKey]);
+
+  const detectCanvas = useCallback((imageData) => {
+    const width = imageData.width;
+    const height = imageData.height;
+    
+    let totalR = 0, totalG = 0, totalB = 0;
+    let samples = 0;
+
+    for (let y = 0; y < height; y += 4) {
+      for (let x = 0; x < width; x += 4) {
+        const i = (y * width + x) * 4;
+        totalR += imageData.data[i];
+        totalG += imageData.data[i + 1];
+        totalB += imageData.data[i + 2];
+        samples++;
+      }
+    }
+
+    const avgR = totalR / samples;
+    const avgG = totalG / samples;
+    const avgB = totalB / samples;
+
+    const hasContent = (avgR > 30 || avgG > 30 || avgB > 30) && 
+                      (avgR < 240 || avgG < 240 || avgB < 240);
+
+    if (hasContent) {
+      let left = width, right = 0, top = height, bottom = 0;
+
+      for (let y = 0; y < height; y += 2) {
+        for (let x = 0; x < width; x += 2) {
+          const i = (y * width + x) * 4;
+          const r = imageData.data[i];
+          const g = imageData.data[i + 1];
+          const b = imageData.data[i + 2];
+
+          if (Math.abs(r - avgR) > 20 || Math.abs(g - avgG) > 20 || Math.abs(b - avgB) > 20) {
+            left = Math.min(left, x);
+            right = Math.max(right, x);
+            top = Math.min(top, y);
+            bottom = Math.max(bottom, y);
+          }
+        }
       }
 
-    } catch (error) {
-      console.error('Content loading error:', error);
-      setDebugInfo(`Error: ${error.message}`);
+      const centerX = (left + right) / 2;
+      const centerY = (top + bottom) / 2;
+      const objWidth = right - left;
+      const objHeight = bottom - top;
+
+      const posX = (centerX / width) * 100;
+      const posY = (centerY / height) * 100;
+
+      trackedPositionRef.current.x = trackedPositionRef.current.x * 0.8 + posX * 0.2;
+      trackedPositionRef.current.y = trackedPositionRef.current.y * 0.8 + posY * 0.2;
+
+      return {
+        position: { x: trackedPositionRef.current.x, y: trackedPositionRef.current.y },
+        size: { width: objWidth, height: objHeight },
+        detected: true
+      };
     }
-  };
 
-  loadContent();
-}, [contentKey]);
+    return { detected: false };
+  }, []);
 
-// Also verify in your Firestore document that referenceImagePath is correctly stored
-// It should look something like: "images/reference.jpg" or just "reference.jpg"
-// Check the console logs to see the exact error and path being used
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
@@ -284,7 +174,7 @@ useEffect(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
-    if (!video || !canvas || !referenceImage) {
+    if (!video || !canvas) {
       animationFrameRef.current = requestAnimationFrame(processFrame);
       return;
     }
@@ -299,38 +189,30 @@ useEffect(() => {
       canvas.height = video.videoHeight;
     }
     
-    // Draw and get current frame
     context.drawImage(video, 0, 0);
-    const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
     
-    // Draw and get reference image
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(referenceImage, 0, 0, canvas.width, canvas.height);
-    const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const centerWidth = canvas.width * 0.5;
+    const centerHeight = canvas.height * 0.5;
+    const x = (canvas.width - centerWidth) / 2;
+    const y = (canvas.height - centerHeight) / 2;
     
-    // Compare images
-    const score = compareImages(capturedFrame, referenceData);
-    setMatchScore(score);
+    const imageData = context.getImageData(x, y, centerWidth, centerHeight);
+    const result = detectCanvas(imageData);
     
-    // If match found, calculate position and start video
-    if (score > 70) {
-      const frameAnalysis = calculateImagePosition(capturedFrame);
+    if (result.detected) {
+      setCanvasPosition(result.position);
+      setCanvasSize(result.size);
       
-      if (frameAnalysis) {
-        setCanvasPosition(frameAnalysis.position);
-        setCanvasSize(frameAnalysis.size);
-        
-        if (!isCanvasDetected) {
-          setIsCanvasDetected(true);
-          startVideo();
-        }
+      if (!isCanvasDetected) {
+        setIsCanvasDetected(true);
+        startVideo();
       }
     } else if (isCanvasDetected) {
       setIsCanvasDetected(false);
     }
 
     animationFrameRef.current = requestAnimationFrame(processFrame);
-  }, [compareImages, calculateImagePosition, referenceImage, startVideo, isCanvasDetected]);
+  }, [detectCanvas, startVideo, isCanvasDetected]);
 
   useEffect(() => {
     let isComponentMounted = true;
@@ -362,6 +244,7 @@ useEffect(() => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
+          console.log('Camera started');
           
           if (isComponentMounted) {
             setDebugInfo('Camera ready - Show image');
@@ -376,7 +259,7 @@ useEffect(() => {
       }
     };
 
-    if (videoUrl && referenceImage) {
+    if (videoUrl) {
       console.log('Starting camera');
       startCamera();
     }
@@ -390,7 +273,7 @@ useEffect(() => {
         currentStream.getTracks().forEach(track => track.stop());
       }
     };
-  }, [processFrame, videoUrl, referenceImage]);
+  }, [processFrame, videoUrl]);
 
   const styles = {
     container: {
@@ -466,7 +349,6 @@ useEffect(() => {
         <div>Status: {debugInfo}</div>
         <div>Key: {contentKey || 'Not found'}</div>
         <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
-        <div>Match Score: {matchScore.toFixed(1)}%</div>
         <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
       </div>
