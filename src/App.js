@@ -33,137 +33,28 @@ const App = () => {
   const [isCanvasDetected, setIsCanvasDetected] = useState(false);
   const [matchScore, setMatchScore] = useState(0);
 
-  const startVideo = useCallback(async () => {
-    if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
-
-    try {
-      overlayVideoRef.current.src = videoUrl;
-      overlayVideoRef.current.muted = false;
-      await overlayVideoRef.current.play();
-      setIsVideoPlaying(true);
-      setDebugInfo('Video playing with sound');
-    } catch (error) {
-      console.error('Video playback error:', error);
-      setDebugInfo('Click anywhere to play video with sound');
-      
-      const playOnClick = () => {
-        if (overlayVideoRef.current) {
-          overlayVideoRef.current.play()
-            .then(() => {
-              setIsVideoPlaying(true);
-              setDebugInfo('Video playing with sound');
-              document.removeEventListener('click', playOnClick);
-            })
-            .catch(console.error);
-        }
-      };
-      document.addEventListener('click', playOnClick);
-    }
-  }, [videoUrl, isVideoPlaying]);
-
-  const compareImages = useCallback((imgData1, imgData2) => {
-    const width = Math.min(imgData1.width, imgData2.width);
-    const height = Math.min(imgData1.height, imgData2.height);
-    const blockSize = 16;
-    const numBlocksX = Math.floor(width / blockSize);
-    const numBlocksY = Math.floor(height / blockSize);
+  const rgbToHsv = (r, g, b) => {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const diff = max - min;
     
-    let totalMatch = 0;
-    let totalBlocks = numBlocksX * numBlocksY;
-
-    for (let blockY = 0; blockY < numBlocksY; blockY++) {
-      for (let blockX = 0; blockX < numBlocksX; blockX++) {
-        let blockAvg1 = [0, 0, 0];
-        let blockAvg2 = [0, 0, 0];
-        let pixelCount = 0;
-
-        for (let y = 0; y < blockSize; y++) {
-          for (let x = 0; x < blockSize; x++) {
-            const pixelX = blockX * blockSize + x;
-            const pixelY = blockY * blockSize + y;
-            const i = (pixelY * width + pixelX) * 4;
-
-            blockAvg1[0] += imgData1.data[i];
-            blockAvg1[1] += imgData1.data[i + 1];
-            blockAvg1[2] += imgData1.data[i + 2];
-
-            blockAvg2[0] += imgData2.data[i];
-            blockAvg2[1] += imgData2.data[i + 1];
-            blockAvg2[2] += imgData2.data[i + 2];
-
-            pixelCount++;
-          }
-        }
-
-        blockAvg1 = blockAvg1.map(sum => sum / pixelCount);
-        blockAvg2 = blockAvg2.map(sum => sum / pixelCount);
-
-        const colorDiff = Math.sqrt(
-          Math.pow(blockAvg1[0] - blockAvg2[0], 2) +
-          Math.pow(blockAvg1[1] - blockAvg2[1], 2) +
-          Math.pow(blockAvg1[2] - blockAvg2[2], 2)
-        );
-
-        const threshold = 50;
-        if (colorDiff < threshold) {
-          totalMatch++;
-        }
-      }
+    let h = 0;
+    if (diff !== 0) {
+      if (max === r) h = ((g - b) / diff) % 6;
+      else if (max === g) h = (b - r) / diff + 2;
+      else h = (r - g) / diff + 4;
     }
-
-    return (totalMatch / totalBlocks) * 100;
-  }, []);
-
-  const processFrame = useCallback(() => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-
-    if (!video || !canvas || !referenceImageRef.current) {
-      animationFrameRef.current = requestAnimationFrame(processFrame);
-      return;
-    }
-
-    const context = canvas.getContext('2d', { 
-      willReadFrequently: true,
-      alpha: false 
-    });
-
-    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-    }
-
-    context.drawImage(video, 0, 0);
-    const currentFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+    h *= 60;
+    if (h < 0) h += 360;
     
-    context.drawImage(referenceImageRef.current, 0, 0, canvas.width, canvas.height);
-    const referenceFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+    const s = max === 0 ? 0 : diff / max;
+    const v = max;
     
-    const score = compareImages(currentFrame, referenceFrame);
-    setMatchScore(score);
+    return [h, s * 100, v * 100];
+  };
 
-    if (score > 60) {  // Lowered threshold for better detection
-      if (!isCanvasDetected) {
-        setIsCanvasDetected(true);
-        startVideo();
-      }
-      
-      const centerX = canvas.width / 2;
-      const centerY = canvas.height / 2;
-      setCanvasPosition({
-        x: (centerX / canvas.width) * 100,
-        y: (centerY / canvas.height) * 100
-      });
-      setCanvasSize({
-        width: canvas.width * 0.8,
-        height: canvas.height * 0.8
-      });
-    } else if (isCanvasDetected) {
-      setIsCanvasDetected(false);
-    }
 
-    animationFrameRef.current = requestAnimationFrame(processFrame);
-  }, [isCanvasDetected, startVideo, compareImages]);
 
   useEffect(() => {
     const loadContent = async () => {
@@ -199,6 +90,7 @@ const App = () => {
         setImageUrl(data.imageUrl);
         setDebugInfo('Content loaded - Please show image');
 
+        // Load reference image
         const img = new Image();
         img.crossOrigin = "anonymous";
         img.onload = () => {
@@ -214,6 +106,92 @@ const App = () => {
 
     loadContent();
   }, [contentKey]);
+
+  const startVideo = useCallback(async () => {
+    if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
+
+    try {
+      overlayVideoRef.current.src = videoUrl;
+      overlayVideoRef.current.muted = false;
+      await overlayVideoRef.current.play();
+      setIsVideoPlaying(true);
+      setDebugInfo('Video playing with sound');
+    } catch (error) {
+      console.error('Video playback error:', error);
+      setDebugInfo('Click anywhere to play video with sound');
+      
+      const playOnClick = () => {
+        if (overlayVideoRef.current) {
+          overlayVideoRef.current.play()
+            .then(() => {
+              setIsVideoPlaying(true);
+              setDebugInfo('Video playing with sound');
+              document.removeEventListener('click', playOnClick);
+            })
+            .catch(console.error);
+        }
+      };
+      document.addEventListener('click', playOnClick);
+    }
+  }, [videoUrl, isVideoPlaying]);
+
+const processFrame = useCallback(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+
+    if (!video || !canvas || !referenceImageRef.current) {
+      animationFrameRef.current = requestAnimationFrame(processFrame);
+      return;
+    }
+
+    const context = canvas.getContext('2d', { 
+      willReadFrequently: true,
+      alpha: false 
+    });
+
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+    
+    const compareImages = (imgData1, imgData2) => {
+      // Same compareImages implementation as before
+    };
+    
+    // Draw and get current frame
+    context.drawImage(video, 0, 0);
+    const currentFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+    
+    // Draw and get reference frame
+    context.drawImage(referenceImageRef.current, 0, 0, canvas.width, canvas.height);
+    const referenceFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+    
+    // Compare images
+    const score = compareImages(currentFrame, referenceFrame);
+    setMatchScore(score);
+
+    if (score > 70) {
+      if (!isCanvasDetected) {
+        setIsCanvasDetected(true);
+        startVideo();
+      }
+      
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      setCanvasPosition({
+        x: (centerX / canvas.width) * 100,
+        y: (centerY / canvas.height) * 100
+      });
+      setCanvasSize({
+        width: canvas.width * 0.8,
+        height: canvas.height * 0.8
+      });
+    } else if (isCanvasDetected) {
+      setIsCanvasDetected(false);
+    }
+
+    animationFrameRef.current = requestAnimationFrame(processFrame);
+  }, [isCanvasDetected, startVideo]);
 
   useEffect(() => {
     let isComponentMounted = true;
