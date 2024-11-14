@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 
 const ImageMatcher = () => {
   const videoRef = useRef(null);
@@ -74,7 +74,7 @@ const ImageMatcher = () => {
   };
 
   // Compare images using HSV color space and regional comparison
-  const compareImages = (imgData1, imgData2) => {
+  const compareImages = useCallback((imgData1, imgData2) => {
     const width = imgData1.width;
     const height = imgData1.height;
     const blockSize = 8; // Compare blocks of pixels instead of individual pixels
@@ -145,10 +145,10 @@ const ImageMatcher = () => {
     
     // Apply a curve to increase sensitivity in the middle range
     return Math.min(100, rawPercentage * 1.5);
-  };
+  }, []);
 
   // Capture and compare frame
-  const captureFrame = () => {
+  const captureFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current) return;
 
     const video = videoRef.current;
@@ -179,7 +179,20 @@ const ImageMatcher = () => {
       const score = compareImages(capturedFrame, referenceData);
       setMatchScore(score);
     };
-  };
+  }, [compareImages, referenceImage]);
+
+  // Set up continuous comparison when streaming is active
+  useEffect(() => {
+    let intervalId;
+    if (isStreaming) {
+      intervalId = setInterval(captureFrame, 500);
+    }
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [isStreaming, captureFrame]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -262,22 +275,6 @@ const ImageMatcher = () => {
           >
             {isStreaming ? "Stop Camera" : "Start Camera"}
           </button>
-          
-          {isStreaming && (
-            <button
-              onClick={captureFrame}
-              style={{
-                padding: '8px 16px',
-                backgroundColor: '#2563eb',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer'
-              }}
-            >
-              Compare Image
-            </button>
-          )}
         </div>
 
         {matchScore !== null && (
