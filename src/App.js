@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getFirestore, collection, query, where, onSnapshot, orderBy, limit } from 'firebase/firestore';
+import { getFirestore, collection, query, where, onSnapshot } from 'firebase/firestore';
 
 // Firebase configuration
 const firebaseConfig = {
@@ -29,8 +29,14 @@ const ImageMatcher = () => {
   const [matchScore, setMatchScore] = useState(null);
   const [error, setError] = useState(null);
   const [referenceImage, setReferenceImage] = useState(null);
-  const [markerImages, setMarkerImages] = useState([]);
   const [selectedMarker, setSelectedMarker] = useState(null);
+  const [contentKey, setContentKey] = useState(null);
+
+  // Get content key from URL
+  const getContentKey = useCallback(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get('key');
+  }, []);
 
   // Load marker image
   const loadMarkerImage = useCallback(async (imageUrl) => {
@@ -62,7 +68,7 @@ const ImageMatcher = () => {
   // Start camera stream
   const startCamera = useCallback(async () => {
     if (!selectedMarker) {
-      setError('Please select a marker image first');
+      setError('Please wait for marker image to load');
       return;
     }
 
@@ -159,34 +165,43 @@ const ImageMatcher = () => {
     setMatchScore(score);
   }, [compareImages, referenceImage]);
 
-  // Firebase listener
+  // Load marker based on content key
   useEffect(() => {
-    try {
-      const arContentRef = collection(db, 'arContent');
-      const activeContentQuery = query(
-        arContentRef,
-        where('isActive', '==', true),
-        orderBy('timestamp', 'desc'),
-        limit(10)
-      );
-
-      const unsubscribe = onSnapshot(activeContentQuery, (snapshot) => {
-        const images = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-        setMarkerImages(images);
-        
-        if (images.length > 0 && !selectedMarker) {
-          handleMarkerSelect(images[0]);
-        }
-      });
-
-      return () => unsubscribe();
-    } catch (err) {
-      setError('Error connecting to database');
+    const key = getContentKey();
+    if (!key) {
+      setError('No content key provided');
+      return;
     }
-  }, [handleMarkerSelect, selectedMarker]);
+
+    setContentKey(key);
+
+    const arContentRef = collection(db, 'arContent');
+    const markerQuery = query(
+      arContentRef,
+      where('contentKey', '==', key),
+      where('isActive', '==', true)
+    );
+
+    const unsubscribe = onSnapshot(markerQuery, (snapshot) => {
+      if (snapshot.empty) {
+        setError('No active marker found for this key');
+        return;
+      }
+
+      const markerDoc = snapshot.docs[0];
+      const markerData = {
+        id: markerDoc.id,
+        ...markerDoc.data()
+      };
+
+      handleMarkerSelect(markerData);
+    }, (err) => {
+      console.error('Error loading marker:', err);
+      setError('Error loading marker image');
+    });
+
+    return () => unsubscribe();
+  }, [getContentKey, handleMarkerSelect]);
 
   // Capture frame interval
   useEffect(() => {
@@ -226,40 +241,11 @@ const ImageMatcher = () => {
         </div>
       )}
 
-      <div style={{ marginBottom: '20px' }}>
-        <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '10px' }}>
-          Select Marker Image
-        </h3>
-        <div style={{ 
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
-          gap: '10px'
-        }}>
-          {markerImages.map((marker) => (
-            <div
-              key={marker.id}
-              onClick={() => handleMarkerSelect(marker)}
-              style={{
-                cursor: 'pointer',
-                border: selectedMarker?.id === marker.id ? '2px solid #3b82f6' : '1px solid #e5e7eb',
-                borderRadius: '8px',
-                overflow: 'hidden'
-              }}
-            >
-              <img
-                src={marker.imageUrl}
-                alt={`Marker ${marker.id}`}
-                style={{ width: '100%', height: '120px', objectFit: 'cover' }}
-              />
-              <div style={{ padding: '8px', backgroundColor: '#f9fafb' }}>
-                <p style={{ fontSize: '12px', color: '#666' }}>
-                  {marker.timestamp?.toDate().toLocaleDateString()}
-                </p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
+      {contentKey && (
+        <p style={{ textAlign: 'center', marginBottom: '15px', color: '#666' }}>
+          Content Key: {contentKey}
+        </p>
+      )}
 
       <div style={{
         display: 'grid',
