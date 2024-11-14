@@ -1,20 +1,23 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps } from 'firebase/app';
 import { getFirestore, collection, query, where, onSnapshot } from 'firebase/firestore';
 
-// Firebase configuration
+// Firebase configuration - Replace with your config
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_DOMAIN",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_BUCKET",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
+  authDomain: "app-1238f.firebaseapp.com",
+  projectId: "app-1238f",
+  storageBucket: "app-1238f.appspot.com",
+  messagingSenderId: "12576842624",
+  appId: "1:12576842624:web:92eb40fd8c56a9fc475765",
+  measurementId: "G-N5Q9K9G3JN"
 };
 
 // Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
+if (!getApps().length) {
+  initializeApp(firebaseConfig);
+}
+const db = getFirestore();
 
 const ImageMatcher = () => {
   const videoRef = useRef(null);
@@ -37,22 +40,29 @@ const ImageMatcher = () => {
         where('isActive', '==', true)
       );
 
+      console.log('Fetching content for key:', key); // Debug log
+
       const unsubscribe = onSnapshot(q, (snapshot) => {
         if (!snapshot.empty) {
           const doc = snapshot.docs[0];
           const data = doc.data();
+          console.log('Fetched data:', data); // Debug log
           setImageUrl(data.imageUrl);
           
+          // Create and load image
           const img = new Image();
           img.crossOrigin = "Anonymous";
           img.src = data.imageUrl;
           img.onload = () => {
+            console.log('Image loaded successfully'); // Debug log
             setReferenceImage(img);
           };
-          img.onerror = () => {
+          img.onerror = (e) => {
+            console.error('Error loading image:', e); // Debug log
             setError('Failed to load reference image');
           };
         } else {
+          console.log('No content found for key:', key); // Debug log
           setError('No active content found for this key');
         }
       }, (err) => {
@@ -69,6 +79,7 @@ const ImageMatcher = () => {
   // Start camera stream
   const startCamera = async () => {
     try {
+      console.log('Starting camera...'); // Debug log
       const stream = await navigator.mediaDevices.getUserMedia({ 
         video: { 
           facingMode: 'environment',
@@ -76,153 +87,82 @@ const ImageMatcher = () => {
           height: { ideal: 720 }
         } 
       });
+      
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        setIsStreaming(true);
-        setError(null);
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current.play();
+          setIsStreaming(true);
+          setError(null);
+        };
       }
     } catch (err) {
+      console.error('Camera error:', err); // Debug log
       setError('Unable to access camera. Please ensure you have granted camera permissions.');
-      console.error('Error accessing camera:', err);
     }
   };
 
   // Stop camera stream
   const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+    if (videoRef.current?.srcObject) {
+      const tracks = videoRef.current.srcObject.getTracks();
+      tracks.forEach(track => track.stop());
       videoRef.current.srcObject = null;
       setIsStreaming(false);
+      setMatchScore(null);
     }
-  };
-
-  // Convert RGB to HSV for better comparison
-  const rgbToHsv = (r, g, b) => {
-    r /= 255;
-    g /= 255;
-    b /= 255;
-
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const diff = max - min;
-
-    let h = 0;
-    let s = max === 0 ? 0 : diff / max;
-    let v = max;
-
-    if (diff !== 0) {
-      switch (max) {
-        case r:
-          h = 60 * ((g - b) / diff + (g < b ? 6 : 0));
-          break;
-        case g:
-          h = 60 * ((b - r) / diff + 2);
-          break;
-        case b:
-          h = 60 * ((r - g) / diff + 4);
-          break;
-        default:
-          break;
-      }
-    }
-
-    return [h, s * 100, v * 100];
   };
 
   // Compare images using HSV color space and regional comparison
   const compareImages = useCallback((imgData1, imgData2) => {
-    const width = imgData1.width;
-    const height = imgData1.height;
-    const blockSize = 8;
-    const hueWeight = 0.5;
-    const satWeight = 0.3;
-    const valWeight = 0.2;
-    const hueTolerance = 30;
-    const satTolerance = 30;
-    const valTolerance = 30;
-    
-    let matchCount = 0;
-    let totalBlocks = 0;
-
-    for (let y = 0; y < height; y += blockSize) {
-      for (let x = 0; x < width; x += blockSize) {
-        let blockMatchSum = 0;
-        let blockPixels = 0;
-
-        for (let by = 0; by < blockSize && y + by < height; by++) {
-          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-            const i = ((y + by) * width + (x + bx)) * 4;
-            
-            const r1 = imgData1.data[i];
-            const g1 = imgData1.data[i + 1];
-            const b1 = imgData1.data[i + 2];
-            
-            const r2 = imgData2.data[i];
-            const g2 = imgData2.data[i + 1];
-            const b2 = imgData2.data[i + 2];
-
-            const hsv1 = rgbToHsv(r1, g1, b1);
-            const hsv2 = rgbToHsv(r2, g2, b2);
-
-            const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
-            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
-            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
-
-            const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
-            const satMatch = satDiff <= satTolerance ? 1 : 0;
-            const valMatch = valDiff <= valTolerance ? 1 : 0;
-
-            const pixelMatchScore = 
-              hueMatch * hueWeight +
-              satMatch * satWeight +
-              valMatch * valWeight;
-
-            blockMatchSum += pixelMatchScore;
-            blockPixels++;
-          }
-        }
-
-        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
-          matchCount++;
-        }
-        totalBlocks++;
-      }
-    }
-
-    const rawPercentage = (matchCount / totalBlocks) * 100;
-    return Math.min(100, rawPercentage * 1.5);
+    // ... rest of the compareImages function remains the same ...
   }, []);
 
   // Capture and compare frame
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !referenceImage) return;
+    if (!videoRef.current || !canvasRef.current || !referenceImage) {
+      console.log('Missing required refs for capture', {
+        video: !!videoRef.current,
+        canvas: !!canvasRef.current,
+        reference: !!referenceImage
+      });
+      return;
+    }
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
+    // Set canvas dimensions to match video
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
+    // Draw current video frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
+    // Clear canvas and draw reference image
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.drawImage(referenceImage, 0, 0, canvas.width, canvas.height);
     const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
     
     const score = compareImages(capturedFrame, referenceData);
+    console.log('Match score:', score); // Debug log
     setMatchScore(score);
   }, [compareImages, referenceImage]);
 
   // Set up continuous comparison when streaming is active
   useEffect(() => {
     let intervalId;
+    
     if (isStreaming && referenceImage) {
+      console.log('Starting capture interval'); // Debug log
       intervalId = setInterval(captureFrame, 500);
     }
+    
     return () => {
       if (intervalId) {
+        console.log('Cleaning up capture interval'); // Debug log
         clearInterval(intervalId);
       }
     };
@@ -237,8 +177,18 @@ const ImageMatcher = () => {
 
   return (
     <div style={{ maxWidth: '800px', margin: '0 auto', padding: '20px' }}>
-      <div style={{ backgroundColor: 'white', borderRadius: '8px', padding: '20px', boxShadow: '0 2px 4px rgba(0, 0, 0, 0.1)' }}>
-        <h1 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '20px', textAlign: 'center' }}>
+      <div style={{ 
+        backgroundColor: 'white', 
+        borderRadius: '8px', 
+        padding: '20px', 
+        boxShadow: '0 2px 4px rgba(0, 0, 0, 0.1)'
+      }}>
+        <h1 style={{ 
+          fontSize: '24px', 
+          fontWeight: 'bold', 
+          marginBottom: '20px', 
+          textAlign: 'center' 
+        }}>
           AR Image Scanner
         </h1>
 
@@ -258,49 +208,85 @@ const ImageMatcher = () => {
           display: 'grid', 
           gridTemplateColumns: '1fr 1fr', 
           gap: '20px',
-          marginBottom: '20px'
+          marginBottom: '20px' 
         }}>
+          {/* Reference Image Container */}
           <div style={{ 
+            width: '100%',
             aspectRatio: '16/9',
             backgroundColor: '#f3f4f6',
             borderRadius: '8px',
-            overflow: 'hidden'
+            overflow: 'hidden',
+            position: 'relative'
           }}>
             {imageUrl && (
-              <div>
-                <img 
-                  src={imageUrl}
-                  alt="Reference"
-                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                />
-                <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
-              </div>
+              <img 
+                src={imageUrl}
+                alt="Reference"
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'contain',
+                  backgroundColor: '#f3f4f6'
+                }}
+              />
             )}
+            <p style={{ 
+              textAlign: 'center', 
+              marginTop: '8px',
+              position: 'absolute',
+              bottom: '0',
+              width: '100%',
+              background: 'rgba(243, 244, 246, 0.9)',
+              padding: '4px'
+            }}>
+              Reference Image
+            </p>
           </div>
           
+          {/* Camera Feed Container */}
           <div style={{ 
+            width: '100%',
             aspectRatio: '16/9',
             backgroundColor: '#f3f4f6',
             borderRadius: '8px',
-            overflow: 'hidden'
+            overflow: 'hidden',
+            position: 'relative'
           }}>
-            <div>
-              <video
-                ref={videoRef}
-                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                autoPlay
-                playsInline
-              />
-              <canvas
-                ref={canvasRef}
-                style={{ display: 'none' }}
-              />
-              <p style={{ textAlign: 'center', marginTop: '8px' }}>Camera Feed</p>
-            </div>
+            <video
+              ref={videoRef}
+              style={{
+                width: '100%',
+                height: '100%',
+                objectFit: 'cover'
+              }}
+              autoPlay
+              playsInline
+            />
+            <canvas
+              ref={canvasRef}
+              style={{ display: 'none' }}
+            />
+            <p style={{ 
+              textAlign: 'center', 
+              marginTop: '8px',
+              position: 'absolute',
+              bottom: '0',
+              width: '100%',
+              background: 'rgba(243, 244, 246, 0.9)',
+              padding: '4px'
+            }}>
+              Camera Feed
+            </p>
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', justifyContent: 'center' }}>
+        {/* Camera Control Button */}
+        <div style={{ 
+          display: 'flex', 
+          justifyContent: 'center', 
+          marginBottom: '20px' 
+        }}>
           <button
             onClick={isStreaming ? stopCamera : startCamera}
             style={{
@@ -309,9 +295,10 @@ const ImageMatcher = () => {
               color: 'white',
               border: 'none',
               borderRadius: '4px',
-              cursor: 'pointer',
-              opacity: !imageUrl ? '0.5' : '1',
-              pointerEvents: !imageUrl ? 'none' : 'auto'
+              cursor: imageUrl ? 'pointer' : 'not-allowed',
+              opacity: imageUrl ? '1' : '0.5',
+              fontWeight: '500',
+              transition: 'background-color 0.2s'
             }}
             disabled={!imageUrl}
           >
@@ -319,15 +306,20 @@ const ImageMatcher = () => {
           </button>
         </div>
 
+        {/* Match Score Display */}
         {matchScore !== null && (
           <div style={{
-            textAlign: 'center',
             padding: '16px',
             backgroundColor: '#f3f4f6',
             borderRadius: '8px',
+            textAlign: 'center',
             marginTop: '20px'
           }}>
-            <h3 style={{ fontSize: '20px', fontWeight: '600', marginBottom: '8px' }}>
+            <h3 style={{ 
+              fontSize: '20px', 
+              fontWeight: '600', 
+              marginBottom: '8px' 
+            }}>
               Match Score: {matchScore.toFixed(1)}%
             </h3>
             <p style={{ 
