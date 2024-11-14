@@ -204,23 +204,27 @@ useEffect(() => {
 
       const doc = snapshot.docs[0];
       const data = doc.data();
+      
+      // Debug log to check document data
+      console.log('Document data:', data);
 
       setVideoUrl(data.videoUrl);
       
       try {
+        // Check if referenceImage exists in document
+        if (!data.referenceImage) {
+          setDebugInfo('Reference image path not found in document');
+          return;
+        }
+
         const storage = getStorage();
-        // Create reference directly to the image file
-        const imageRef = ref(storage, `images/${data.referenceImagePath}`);
-        // OR if you have full path: const imageRef = ref(storage, data.referenceImagePath);
+        const imageRef = ref(storage, `images/${data.referenceImage}`);
         const imageUrl = await getDownloadURL(imageRef);
-        
-        console.log('Image URL:', imageUrl); // Debug log
         
         const img = new Image();
         img.crossOrigin = "anonymous";
         
         img.onload = () => {
-          console.log('Image loaded successfully'); // Debug log
           setReferenceImage(img);
           setDebugInfo('Content loaded - Please show image');
         };
