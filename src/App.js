@@ -30,7 +30,8 @@ const App = () => {
   const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [isCanvasDetected, setIsCanvasDetected] = useState(false);
-  const [matchScore, setMatchScore] = useState(null);
+  const [matchScore, setMatchScore] = useState(0);
+  const [matchStatus, setMatchStatus] = useState('Not checked yet');
 
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
@@ -174,8 +175,11 @@ const App = () => {
       
     const score = compareImages(capturedFrame, referenceData);
     setMatchScore(score);
+    
+    const matchThreshold = 70;
+    setMatchStatus(`${score > matchThreshold ? 'Match Found!' : 'No Match Yet'} (Threshold: ${matchThreshold}%)`);
 
-    if (score > 70) {
+    if (score > matchThreshold) {
       setIsCanvasDetected(true);
       startVideo();
       
@@ -410,9 +414,8 @@ const App = () => {
         <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
         <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
-        {matchScore !== null && (
-          <div>Match Score: {matchScore.toFixed(1)}%</div>
-        )}
+        <div>Match Score: {matchScore.toFixed(1)}%</div>
+        <div>Match Status: {matchStatus}</div>
       </div>
 
       {imageUrl && (
