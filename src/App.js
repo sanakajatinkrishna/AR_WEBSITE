@@ -209,27 +209,30 @@ useEffect(() => {
       
       try {
         const storage = getStorage();
-        // Create storage reference with child path
-        const storageRef = ref(storage);
-        const imageRef = ref(storageRef, data.referenceImagePath);
+        // Create reference directly to the image file
+        const imageRef = ref(storage, `images/${data.referenceImagePath}`);
+        // OR if you have full path: const imageRef = ref(storage, data.referenceImagePath);
         const imageUrl = await getDownloadURL(imageRef);
+        
+        console.log('Image URL:', imageUrl); // Debug log
         
         const img = new Image();
         img.crossOrigin = "anonymous";
         
         img.onload = () => {
+          console.log('Image loaded successfully'); // Debug log
           setReferenceImage(img);
           setDebugInfo('Content loaded - Please show image');
         };
         
         img.onerror = (error) => {
           console.error('Error loading reference image:', error);
-          setDebugInfo('Error loading reference image');
+          setDebugInfo(`Error loading image: ${error.message}`);
         };
 
         img.src = imageUrl;
       } catch (storageError) {
-        console.error('Storage error:', storageError);
+        console.error('Storage error details:', storageError);
         setDebugInfo(`Storage error: ${storageError.message}`);
       }
 
@@ -241,6 +244,10 @@ useEffect(() => {
 
   loadContent();
 }, [contentKey]);
+
+// Also verify in your Firestore document that referenceImagePath is correctly stored
+// It should look something like: "images/reference.jpg" or just "reference.jpg"
+// Check the console logs to see the exact error and path being used
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
