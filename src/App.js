@@ -8,13 +8,17 @@ const ImageMatcher = () => {
   const [error, setError] = useState(null);
 
   // Import reference image
-  // Update this path to match your image location
   const referenceImage = require('./assets/images/reference.jpg');
+
   // Start camera stream
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'environment' } 
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        } 
       });
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -36,30 +40,111 @@ const ImageMatcher = () => {
     }
   };
 
-  // Compare images pixel by pixel
-  const compareImages = (imgData1, imgData2) => {
-    let matchCount = 0;
-    const tolerance = 50;
+  // Convert RGB to HSV for better comparison
+  const rgbToHsv = (r, g, b) => {
+    r /= 255;
+    g /= 255;
+    b /= 255;
 
-    for (let i = 0; i < imgData1.data.length; i += 4) {
-      const r1 = imgData1.data[i];
-      const g1 = imgData1.data[i + 1];
-      const b1 = imgData1.data[i + 2];
-      
-      const r2 = imgData2.data[i];
-      const g2 = imgData2.data[i + 2];
-      const b2 = imgData2.data[i + 2];
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const diff = max - min;
 
-      if (
-        Math.abs(r1 - r2) < tolerance &&
-        Math.abs(g1 - g2) < tolerance &&
-        Math.abs(b1 - b2) < tolerance
-      ) {
-        matchCount++;
+    let h = 0;
+    let s = max === 0 ? 0 : diff / max;
+    let v = max;
+
+    if (diff !== 0) {
+      switch (max) {
+        case r:
+          h = 60 * ((g - b) / diff + (g < b ? 6 : 0));
+          break;
+        case g:
+          h = 60 * ((b - r) / diff + 2);
+          break;
+        case b:
+          h = 60 * ((r - g) / diff + 4);
+          break;
+        default:
+          break;
       }
     }
 
-    return (matchCount / (imgData1.data.length / 4)) * 100;
+    return [h, s * 100, v * 100];
+  };
+
+  // Compare images using HSV color space and regional comparison
+  const compareImages = (imgData1, imgData2) => {
+    const width = imgData1.width;
+    const height = imgData1.height;
+    const blockSize = 8; // Compare blocks of pixels instead of individual pixels
+    const hueWeight = 0.5;
+    const satWeight = 0.3;
+    const valWeight = 0.2;
+    const hueTolerance = 30; // Degrees
+    const satTolerance = 30; // Percent
+    const valTolerance = 30; // Percent
+    
+    let matchCount = 0;
+    let totalBlocks = 0;
+
+    // Compare blocks of pixels
+    for (let y = 0; y < height; y += blockSize) {
+      for (let x = 0; x < width; x += blockSize) {
+        let blockMatchSum = 0;
+        let blockPixels = 0;
+
+        // Compare pixels within each block
+        for (let by = 0; by < blockSize && y + by < height; by++) {
+          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+            const i = ((y + by) * width + (x + bx)) * 4;
+            
+            // Get RGB values
+            const r1 = imgData1.data[i];
+            const g1 = imgData1.data[i + 1];
+            const b1 = imgData1.data[i + 2];
+            
+            const r2 = imgData2.data[i];
+            const g2 = imgData2.data[i + 1];
+            const b2 = imgData2.data[i + 2];
+
+            // Convert to HSV
+            const hsv1 = rgbToHsv(r1, g1, b1);
+            const hsv2 = rgbToHsv(r2, g2, b2);
+
+            // Compare HSV values with weighted importance
+            const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
+            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
+            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
+
+            // Calculate match score for this pixel
+            const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
+            const satMatch = satDiff <= satTolerance ? 1 : 0;
+            const valMatch = valDiff <= valTolerance ? 1 : 0;
+
+            const pixelMatchScore = 
+              hueMatch * hueWeight +
+              satMatch * satWeight +
+              valMatch * valWeight;
+
+            blockMatchSum += pixelMatchScore;
+            blockPixels++;
+          }
+        }
+
+        // If block has a good average match, count it
+        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
+          matchCount++;
+        }
+        totalBlocks++;
+      }
+    }
+
+    // Calculate final percentage with increased sensitivity
+    const rawPercentage = (matchCount / totalBlocks) * 100;
+    
+    // Apply a curve to increase sensitivity in the middle range
+    return Math.min(100, rawPercentage * 1.5);
   };
 
   // Capture and compare frame
@@ -85,7 +170,8 @@ const ImageMatcher = () => {
     refImg.src = referenceImage;
     
     refImg.onload = () => {
-      // Draw reference image and get its data
+      // Clear canvas and draw reference image
+      context.clearRect(0, 0, canvas.width, canvas.height);
       context.drawImage(refImg, 0, 0, canvas.width, canvas.height);
       const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
       
@@ -200,10 +286,10 @@ const ImageMatcher = () => {
             backgroundColor: '#f3f4f6',
             borderRadius: '8px'
           }}>
-            <h3 style={{ marginBottom: '8px' }}>Match Score: {matchScore.toFixed(2)}%</h3>
+            <h3 style={{ marginBottom: '8px' }}>Match Score: {matchScore.toFixed(1)}%</h3>
             <p style={{ color: '#4b5563' }}>
-              {matchScore > 80 ? "It's a match!" : 
-               matchScore > 50 ? "Partial match" : "No match found"}
+              {matchScore > 70 ? "It's a match!" : 
+               matchScore > 40 ? "Partial match" : "No match found"}
             </p>
           </div>
         )}
