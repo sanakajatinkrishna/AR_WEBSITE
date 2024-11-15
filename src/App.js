@@ -1,6 +1,15 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, query, where, getDocs, updateDoc, doc, increment } from 'firebase/firestore';
+import { 
+  getFirestore, 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  updateDoc, 
+  doc, 
+  increment,
+} from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
@@ -12,12 +21,16 @@ const firebaseConfig = {
   measurementId: "G-N5Q9K9G3JN"
 };
 
+// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const ImageMatcher = () => {
+  // Refs
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+
+  // State
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(null);
   const [error, setError] = useState(null);
@@ -25,7 +38,64 @@ const ImageMatcher = () => {
   const [docId, setDocId] = useState(null);
   const [videoUrl, setVideoUrl] = useState(null);
   const [showVideo, setShowVideo] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [matchFound, setMatchFound] = useState(false);
 
+  // Fetch reference image on component mount
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const key = params.get('key');
+    if (key) {
+      fetchReferenceImage(key);
+    } else {
+      setError('No content key provided');
+      setLoading(false);
+    }
+  }, []);
+
+  // Fetch image from Firebase
+  const fetchReferenceImage = async (key) => {
+    try {
+      setLoading(true);
+      const q = query(collection(db, "arContent"), where("contentKey", "==", key));
+      const querySnapshot = await getDocs(q);
+      
+      if (querySnapshot.empty) {
+        throw new Error('Content not found');
+      }
+
+      const document = querySnapshot.docs[0];
+      const data = document.data();
+      
+      if (!data.imageUrl || !data.videoUrl) {
+        throw new Error('Missing content URLs');
+      }
+
+      setDocId(document.id);
+      setVideoUrl(data.videoUrl);
+
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      
+      // Create promise for image loading
+      const imageLoadPromise = new Promise((resolve, reject) => {
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('Failed to load image'));
+      });
+
+      img.src = data.imageUrl;
+      const loadedImage = await imageLoadPromise;
+      setReferenceImage(loadedImage);
+      setLoading(false);
+
+    } catch (err) {
+      console.error('Error fetching content:', err);
+      setError(err.message);
+      setLoading(false);
+    }
+  };
+
+  // RGB to HSV conversion for image comparison
   const rgbToHsv = useCallback((r, g, b) => {
     r /= 255;
     g /= 255;
@@ -49,12 +119,14 @@ const ImageMatcher = () => {
           h = 60 * ((r - g) / diff + 4); 
           break;
         default:
+          h = 0;
           break;
       }
     }
     return [h, s * 100, v * 100];
   }, []);
 
+  // Compare images for matching
   const compareImages = useCallback((imgData1, imgData2) => {
     const width = imgData1.width;
     const height = imgData1.height;
@@ -104,51 +176,22 @@ const ImageMatcher = () => {
     return (matchCount / totalBlocks) * 100;
   }, [rgbToHsv]);
 
+  // Update view count in Firebase
   const updateViewCount = useCallback(async () => {
-    if (docId) {
-      try {
-        const docRef = doc(db, "arContent", docId);
-        await updateDoc(docRef, {
-          views: increment(1)
-        });
-      } catch (err) {
-        console.error("Error updating view count:", err);
-      }
-    }
-  }, [docId]);
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const key = params.get('key');
-    if (key) {
-      fetchReferenceImage(key);
-    }
-  }, []);
-
-  const fetchReferenceImage = async (key) => {
+    if (!docId || matchFound) return;
+    
     try {
-      const q = query(collection(db, "arContent"), where("contentKey", "==", key));
-      const querySnapshot = await getDocs(q);
-      
-      if (!querySnapshot.empty) {
-        const doc = querySnapshot.docs[0];
-        const data = doc.data();
-        setDocId(doc.id);
-        setVideoUrl(data.videoUrl);
-        
-        if (data.imageUrl) {
-          const img = new Image();
-          img.crossOrigin = "anonymous";
-          img.onload = () => setReferenceImage(img);
-          img.src = data.imageUrl;
-        }
-      }
+      const docRef = doc(db, "arContent", docId);
+      await updateDoc(docRef, {
+        views: increment(1)
+      });
+      setMatchFound(true);
     } catch (err) {
-      setError('Error loading reference image');
-      console.error(err);
+      console.error("Error updating view count:", err);
     }
-  };
+  }, [docId, matchFound]);
 
+  // Camera controls
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -158,6 +201,7 @@ const ImageMatcher = () => {
           height: { ideal: 720 }
         } 
       });
+      
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         setIsStreaming(true);
@@ -165,7 +209,7 @@ const ImageMatcher = () => {
       }
     } catch (err) {
       setError('Unable to access camera. Please check permissions.');
-      console.error(err);
+      console.error('Camera error:', err);
     }
   };
 
@@ -177,9 +221,10 @@ const ImageMatcher = () => {
     }
   }, []);
 
+  // Image matching process
   useEffect(() => {
     let intervalId;
-    if (isStreaming && referenceImage) {
+    if (isStreaming && referenceImage && !showVideo) {
       intervalId = setInterval(() => {
         if (!videoRef.current || !canvasRef.current) return;
 
@@ -203,22 +248,34 @@ const ImageMatcher = () => {
         if (score > 70 && !showVideo) {
           setShowVideo(true);
           updateViewCount();
+          stopCamera();
         }
       }, 500);
     }
-    return () => clearInterval(intervalId);
-  }, [isStreaming, referenceImage, compareImages, showVideo, updateViewCount]);
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [isStreaming, referenceImage, compareImages, showVideo, updateViewCount, stopCamera]);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => stopCamera();
   }, [stopCamera]);
 
-  // Rest of the return JSX remains the same...
+  if (loading) {
+    return (
+      <div className="max-w-4xl mx-auto p-4 flex justify-center items-center min-h-screen">
+        <div className="text-xl font-semibold">Loading content...</div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-4xl mx-auto p-4">
       <div className="bg-white rounded-lg shadow-lg p-6">
-        <h1 className="text-2xl font-bold mb-4">AR Image Matcher</h1>
+        <h1 className="text-2xl font-bold mb-4 text-center">AR Image Matcher</h1>
         
         {error && (
           <div className="bg-red-50 text-red-700 p-4 rounded-lg mb-4">
@@ -236,7 +293,7 @@ const ImageMatcher = () => {
                 crossOrigin="anonymous"
               />
             )}
-            <p className="text-center mt-2">Reference Image</p>
+            <p className="text-center mt-2 font-medium">Reference Image</p>
           </div>
           
           <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden relative">
@@ -263,30 +320,38 @@ const ImageMatcher = () => {
                 />
               </>
             )}
-            <p className="text-center mt-2">
+            <p className="text-center mt-2 font-medium">
               {showVideo ? "AR Content" : "Camera Feed"}
             </p>
           </div>
         </div>
 
-        <button
-          onClick={isStreaming ? stopCamera : startCamera}
-          className={`w-full py-2 px-4 rounded-lg text-white font-semibold mb-4 ${
-            isStreaming ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
-          }`}
-          disabled={showVideo}
-        >
-          {isStreaming ? "Stop Camera" : "Start Camera"}
-        </button>
+        {!showVideo && (
+          <button
+            onClick={isStreaming ? stopCamera : startCamera}
+            className={`w-full py-3 px-4 rounded-lg text-white font-semibold mb-4 transition-colors ${
+              isStreaming ? 
+                'bg-red-600 hover:bg-red-700' : 
+                'bg-blue-600 hover:bg-blue-700'
+            }`}
+          >
+            {isStreaming ? "Stop Camera" : "Start Camera"}
+          </button>
+        )}
 
         {matchScore !== null && !showVideo && (
           <div className="bg-gray-50 p-4 rounded-lg">
             <h3 className="text-lg font-semibold mb-2">
               Match Score: {matchScore.toFixed(1)}%
             </h3>
-            <p className="text-gray-600">
-              {matchScore > 70 ? "It's a match!" : 
-               matchScore > 40 ? "Partial match" : "No match found"}
+            <p className={`${
+              matchScore > 70 ? 'text-green-600' : 
+              matchScore > 40 ? 'text-yellow-600' : 
+              'text-red-600'
+            }`}>
+              {matchScore > 70 ? "It's a match! Loading AR content..." : 
+               matchScore > 40 ? "Getting closer! Keep adjusting..." : 
+               "No match found - try repositioning"}
             </p>
           </div>
         )}
