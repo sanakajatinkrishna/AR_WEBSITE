@@ -73,30 +73,7 @@ const fetchReferenceImage = async (key) => {
 
     setDocId(document.id);
     setVideoUrl(data.videoUrl);
-
-    // Fetch and create image with CORS headers
-    const response = await fetch(data.imageUrl, {
-      mode: 'cors',
-      headers: {
-        'Access-Control-Allow-Origin': '*'
-      }
-    });
-
-    const blob = await response.blob();
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    
-    const imageLoadPromise = new Promise((resolve, reject) => {
-      img.onload = () => resolve(img);
-      img.onerror = (e) => {
-        console.error('Image load error:', e);
-        reject(new Error('Failed to load image'));
-      }
-    });
-
-    img.src = URL.createObjectURL(blob);
-    const loadedImage = await imageLoadPromise;
-    setReferenceImage(loadedImage);
+    setReferenceImage({ src: data.imageUrl }); // Changed this line
     setLoading(false);
 
   } catch (err) {
