@@ -1,355 +1,253 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useRef,useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, query, where, getDocs, updateDoc, increment } from 'firebase/firestore';
+import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
+import * as tf from '@tensorflow/tfjs';
+import '@tensorflow/tfjs-backend-webgl';
+import * as mobilenet from '@tensorflow-models/mobilenet';
 
-// Initialize Firebase (make sure to replace with your config)
+// Initialize Firebase with your config
 const firebaseConfig = {
-  apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
-  authDomain: "app-1238f.firebaseapp.com",
-  projectId: "app-1238f",
-  storageBucket: "app-1238f.appspot.com",
-  messagingSenderId: "12576842624",
-  appId: "1:12576842624:web:92eb40fd8c56a9fc475765",
-  measurementId: "G-N5Q9K9G3JN"
+
+ apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
+
+authDomain: "app-1238f.firebaseapp.com",
+
+projectId: "app-1238f",
+
+storageBucket: "app-1238f.appspot.com",
+
+messagingSenderId: "12576842624",
+
+appId: "1:12576842624:web:92eb40fd8c56a9fc475765",
+
+measurementId: "G-N5Q9K9G3JN"
+
 };
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-const ImageMatcher = ({ contentKey }) => {
+const ARViewer = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [matchScore, setMatchScore] = useState(null);
+  const overlayVideoRef = useRef(null);
+  const [model, setModel] = useState(null);
+  const [targetImage, setTargetImage] = useState(null);
+  const [arVideo, setArVideo] = useState(null);
+  const [isMatching, setIsMatching] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [referenceImageUrl, setReferenceImageUrl] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
 
-  // Fetch reference image from Firebase
+  // Get content key from URL parameters
+  const urlParams = new URLSearchParams(window.location.search);
+  const contentKey = urlParams.get('key');
+
+  // Initialize TensorFlow and load MobileNet model
   useEffect(() => {
-    const fetchReferenceImage = async () => {
+    const initTF = async () => {
       try {
-        // Get the content document from Firestore
-        const contentQuery = query(
+        await tf.setBackend('webgl');
+        const loadedModel = await mobilenet.load();
+        setModel(loadedModel);
+        setLoading(false);
+      } catch (err) {
+        setError('Failed to initialize TensorFlow: ' + err.message);
+        setLoading(false);
+      }
+    };
+
+    initTF();
+  }, []);
+
+  // Fetch content from Firebase
+  useEffect(() => {
+    const fetchContent = async () => {
+      if (!contentKey) {
+        setError('No content key provided');
+        return;
+      }
+
+      try {
+        const q = query(
           collection(db, 'arContent'),
           where('contentKey', '==', contentKey),
           where('isActive', '==', true)
         );
-        
-        const querySnapshot = await getDocs(contentQuery);
 
+        const querySnapshot = await getDocs(q);
         if (querySnapshot.empty) {
-          throw new Error('No active content found with the provided key');
+          setError('Content not found');
+          return;
         }
 
-        const contentData = querySnapshot.docs[0].data();
-        setReferenceImageUrl(contentData.imageUrl);
-        setIsLoading(false);
+        const content = querySnapshot.docs[0].data();
+        setTargetImage(content.imageUrl);
+        setArVideo(content.videoUrl);
       } catch (err) {
-        setError('Error loading reference image: ' + err.message);
-        setIsLoading(false);
-        console.error('Error fetching reference image:', err);
+        setError('Failed to fetch content: ' + err.message);
       }
     };
 
-    if (contentKey) {
-      fetchReferenceImage();
-    }
+    fetchContent();
   }, [contentKey]);
 
-  // Start camera stream
-  const startCamera = async () => {
+  // Initialize camera
+  useEffect(() => {
+    let stream = null;
+
+    const initCamera = async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' }
+        });
+        
+        // Store video ref in a variable that's stable throughout the effect
+        const videoElement = videoRef.current;
+        if (videoElement) {
+          videoElement.srcObject = stream;
+        }
+      } catch (err) {
+        setError('Failed to access camera: ' + err.message);
+      }
+    };
+
+    initCamera();
+
+    // Cleanup function uses the stream variable from the closure
+    return () => {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, []);
+
+  // Image matching function wrapped in useCallback
+  const matchImages = useCallback(async (capturedImage, targetImage) => {
+    if (!model) return false;
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        } 
-      });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        setIsStreaming(true);
-        setError(null);
-      }
+      // Get features from captured frame
+      const capturedTensor = tf.browser.fromPixels(capturedImage);
+      const capturedFeatures = await model.infer(capturedTensor, true);
+
+      // Get features from target image
+      const targetTensor = tf.browser.fromPixels(targetImage);
+      const targetFeatures = await model.infer(targetTensor, true);
+
+      // Calculate similarity
+      const similarity = tf.metrics.cosineProximity(
+        capturedFeatures.reshape([1, -1]),
+        targetFeatures.reshape([1, -1])
+      ).dataSync()[0];
+
+      // Cleanup tensors
+      tf.dispose([capturedTensor, targetTensor, capturedFeatures, targetFeatures]);
+
+      return similarity > 0.85; // Adjust threshold as needed
     } catch (err) {
-      setError('Unable to access camera. Please ensure you have granted camera permissions.');
-      console.error('Error accessing camera:', err);
+      console.error('Error matching images:', err);
+      return false;
     }
-  };
+  }, [model]); // Only recreate if model changes
 
-  // Stop camera stream
-  const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-      setIsStreaming(false);
-    }
-  };
+  // Main detection loop
+  useEffect(() => {
+    if (!model || !targetImage || !videoRef.current || !canvasRef.current) return;
 
-  // Convert RGB to HSV for better comparison
-  const rgbToHsv = (r, g, b) => {
-    r /= 255;
-    g /= 255;
-    b /= 255;
-
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const diff = max - min;
-
-    let h = 0;
-    let s = max === 0 ? 0 : diff / max;
-    let v = max;
-
-    if (diff !== 0) {
-      switch (max) {
-        case r:
-          h = 60 * ((g - b) / diff + (g < b ? 6 : 0));
-          break;
-        case g:
-          h = 60 * ((b - r) / diff + 2);
-          break;
-        case b:
-          h = 60 * ((r - g) / diff + 4);
-          break;
-        default:
-          break;
-      }
-    }
-
-    return [h, s * 100, v * 100];
-  };
-
-  // Compare images using HSV color space and regional comparison
-  const compareImages = useCallback((imgData1, imgData2) => {
-    const width = imgData1.width;
-    const height = imgData1.height;
-    const blockSize = 8;
-    const hueWeight = 0.5;
-    const satWeight = 0.3;
-    const valWeight = 0.2;
-    const hueTolerance = 30;
-    const satTolerance = 30;
-    const valTolerance = 30;
+    let animationFrame;
+    let isActive = true; // Flag to track if effect is still active
+    const targetImg = new Image();
+    targetImg.src = targetImage;
     
-    let matchCount = 0;
-    let totalBlocks = 0;
+    const detect = async () => {
+      if (!isActive) return; // Check if effect is still active
 
-    for (let y = 0; y < height; y += blockSize) {
-      for (let x = 0; x < width; x += blockSize) {
-        let blockMatchSum = 0;
-        let blockPixels = 0;
+      const context = canvasRef.current?.getContext('2d');
+      if (!context || !videoRef.current) return;
 
-        for (let by = 0; by < blockSize && y + by < height; by++) {
-          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-            const i = ((y + by) * width + (x + bx)) * 4;
-            
-            const r1 = imgData1.data[i];
-            const g1 = imgData1.data[i + 1];
-            const b1 = imgData1.data[i + 2];
-            
-            const r2 = imgData2.data[i];
-            const g2 = imgData2.data[i + 1];
-            const b2 = imgData2.data[i + 2];
+      context.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
 
-            const hsv1 = rgbToHsv(r1, g1, b1);
-            const hsv2 = rgbToHsv(r2, g2, b2);
-
-            const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
-            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
-            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
-
-            const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
-            const satMatch = satDiff <= satTolerance ? 1 : 0;
-            const valMatch = valDiff <= valTolerance ? 1 : 0;
-
-            const pixelMatchScore = 
-              hueMatch * hueWeight +
-              satMatch * satWeight +
-              valMatch * valWeight;
-
-            blockMatchSum += pixelMatchScore;
-            blockPixels++;
-          }
-        }
-
-        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
-          matchCount++;
-        }
-        totalBlocks++;
-      }
-    }
-
-    const rawPercentage = (matchCount / totalBlocks) * 100;
-    return Math.min(100, rawPercentage * 1.5);
-  }, []);
-
-  // Capture and compare frame
-  const captureFrame = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current || !referenceImageUrl) return;
-
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
-
-    const refImg = new Image();
-    refImg.crossOrigin = 'anonymous';  // Important for CORS
-    refImg.src = referenceImageUrl;
-    
-    refImg.onload = async () => {
-      context.clearRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(refImg, 0, 0, canvas.width, canvas.height);
-      const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
+      const isMatch = await matchImages(canvasRef.current, targetImg);
       
-      const score = compareImages(capturedFrame, referenceData);
-      setMatchScore(score);
-
-      // Update match count in Firestore if it's a good match
-      if (score > 70) {
-        try {
-          const contentQuery = query(
-            collection(db, 'arContent'),
-            where('contentKey', '==', contentKey)
-          );
-          
-          const querySnapshot = await getDocs(contentQuery);
-          
-          if (!querySnapshot.empty) {
-            const docRef = querySnapshot.docs[0].ref;
-            await updateDoc(docRef, {
-              matches: increment(1)
-            });
-          }
-        } catch (err) {
-          console.error('Error updating match count:', err);
+      if (isMatch && !isMatching) {
+        setIsMatching(true);
+        if (overlayVideoRef.current) {
+          overlayVideoRef.current.play();
+        }
+      } else if (!isMatch && isMatching) {
+        setIsMatching(false);
+        if (overlayVideoRef.current) {
+          overlayVideoRef.current.pause();
+          overlayVideoRef.current.currentTime = 0;
         }
       }
-    };
-  }, [compareImages, referenceImageUrl, contentKey]);
 
-  // Set up continuous comparison when streaming is active
-  useEffect(() => {
-    let intervalId;
-    if (isStreaming && referenceImageUrl) {
-      intervalId = setInterval(captureFrame, 500);
-    }
-    return () => {
-      if (intervalId) {
-        clearInterval(intervalId);
+      if (isActive) {
+        animationFrame = requestAnimationFrame(detect);
       }
     };
-  }, [isStreaming, captureFrame, referenceImageUrl]);
 
-  // Cleanup on unmount
-  useEffect(() => {
+    detect();
+
+    // Cleanup function
     return () => {
-      stopCamera();
+      isActive = false;
+      if (animationFrame) {
+        cancelAnimationFrame(animationFrame);
+      }
     };
-  }, []);
+  }, [model, targetImage, isMatching, matchImages]); // Added matchImages to dependencies
 
-  if (isLoading) {
-    return <div>Loading reference image...</div>;
+  if (loading) {
+    return <div className="fixed inset-0 flex items-center justify-center bg-gray-900">
+      <div className="text-white text-xl">Loading AR Viewer...</div>
+    </div>;
+  }
+
+  if (error) {
+    return <div className="fixed inset-0 flex items-center justify-center bg-gray-900">
+      <div className="text-red-500 text-xl">{error}</div>
+    </div>;
   }
 
   return (
-    <div style={{ maxWidth: '800px', margin: '0 auto', padding: '20px' }}>
-      <div style={{ marginBottom: '20px' }}>
-        <h1 style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          Image Matcher
-        </h1>
-      </div>
+    <div className="relative h-screen w-screen">
+      {/* Camera Feed */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className="absolute inset-0 w-full h-full object-cover"
+      />
 
-      <div>
-        {error && (
-          <div style={{ 
-            padding: '10px', 
-            backgroundColor: '#fee2e2', 
-            color: '#dc2626', 
-            borderRadius: '4px',
-            marginBottom: '20px' 
-          }}>
-            {error}
-          </div>
-        )}
-        
-        <div style={{ 
-          display: 'grid', 
-          gridTemplateColumns: '1fr 1fr', 
-          gap: '20px',
-          marginBottom: '20px'
-        }}>
-          <div style={{ 
-            aspectRatio: '16/9',
-            backgroundColor: '#f3f4f6',
-            borderRadius: '8px',
-            overflow: 'hidden'
-          }}>
-            <img 
-              src={referenceImageUrl}
-              alt="Reference"
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              crossOrigin="anonymous"
-            />
-            <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
-          </div>
-          <div style={{ 
-            aspectRatio: '16/9',
-            backgroundColor: '#f3f4f6',
-            borderRadius: '8px',
-            overflow: 'hidden'
-          }}>
-            <video
-              ref={videoRef}
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              autoPlay
-              playsInline
-            />
-            <canvas
-              ref={canvasRef}
-              style={{ display: 'none' }}
-            />
-            <p style={{ textAlign: 'center', marginTop: '8px' }}>Camera Feed</p>
-          </div>
+      {/* Canvas for image processing */}
+      <canvas
+        ref={canvasRef}
+        width={window.innerWidth}
+        height={window.innerHeight}
+        className="hidden"
+      />
+
+      {/* AR Video Overlay */}
+      {isMatching && (
+        <video
+          ref={overlayVideoRef}
+          src={arVideo}
+          className="absolute inset-0 w-full h-full object-cover"
+          playsInline
+          loop
+        />
+      )}
+
+      {/* UI Elements */}
+      <div className="absolute top-4 left-4 right-4 flex justify-between items-center">
+        <div className="bg-black bg-opacity-50 text-white px-4 py-2 rounded">
+          {isMatching ? 'Match Found!' : 'Scanning...'}
         </div>
-
-        <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
-          <button
-            onClick={isStreaming ? stopCamera : startCamera}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: isStreaming ? '#dc2626' : '#2563eb',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer'
-            }}
-          >
-            {isStreaming ? "Stop Camera" : "Start Camera"}
-          </button>
-        </div>
-
-        {matchScore !== null && (
-          <div style={{ 
-            padding: '16px', 
-            backgroundColor: '#f3f4f6',
-            borderRadius: '8px'
-          }}>
-            <h3 style={{ marginBottom: '8px' }}>Match Score: {matchScore.toFixed(1)}%</h3>
-            <p style={{ color: '#4b5563' }}>
-              {matchScore > 70 ? "It's a match!" : 
-               matchScore > 40 ? "Partial match" : "No match found"}
-            </p>
-          </div>
-        )}
       </div>
     </div>
   );
 };
 
-export default ImageMatcher;
+export default ARViewer;
