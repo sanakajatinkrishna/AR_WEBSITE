@@ -28,145 +28,174 @@ const ImageMatcher = () => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(0);
   const [selectedMarker, setSelectedMarker] = useState(null);
-  const [referenceImageData, setReferenceImageData] = useState(null);
+  const [error, setError] = useState(null);
 
-  // Get content key from URL
-  const getContentKey = useCallback(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    return urlParams.get('key');
-  }, []);
+  // Convert RGB to HSV for better comparison
+  const rgbToHsv = (r, g, b) => {
+    r /= 255;
+    g /= 255;
+    b /= 255;
 
-  // Compare images with improved matching algorithm
-  const compareImages = useCallback((capturedImageData, refImageData) => {
-    if (!capturedImageData || !refImageData) return 0;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const diff = max - min;
 
-    const width = capturedImageData.width;
-    const height = capturedImageData.height;
-    const blockSize = 16; // Increased block size for better performance
+    let h = 0;
+    let s = max === 0 ? 0 : diff / max;
+    let v = max;
+
+    if (diff !== 0) {
+      switch (max) {
+        case r:
+          h = 60 * ((g - b) / diff + (g < b ? 6 : 0));
+          break;
+        case g:
+          h = 60 * ((b - r) / diff + 2);
+          break;
+        case b:
+          h = 60 * ((r - g) / diff + 4);
+          break;
+        default:
+          break;
+      }
+    }
+
+    return [h, s * 100, v * 100];
+  };
+
+  // Compare images using HSV color space
+  const compareImages = useCallback((imgData1, imgData2) => {
+    const width = imgData1.width;
+    const height = imgData1.height;
+    const blockSize = 8;
+    const hueWeight = 0.5;
+    const satWeight = 0.3;
+    const valWeight = 0.2;
+    const hueTolerance = 30;
+    const satTolerance = 30;
+    const valTolerance = 30;
+    
     let matchCount = 0;
     let totalBlocks = 0;
 
-    // Calculate average color for a block
-    const getBlockAverage = (imageData, startX, startY, blockSize) => {
-      let rSum = 0, gSum = 0, bSum = 0;
-      let pixelCount = 0;
-
-      for (let y = startY; y < Math.min(startY + blockSize, height); y++) {
-        for (let x = startX; x < Math.min(startX + blockSize, width); x++) {
-          const i = (y * width + x) * 4;
-          rSum += imageData.data[i];
-          gSum += imageData.data[i + 1];
-          bSum += imageData.data[i + 2];
-          pixelCount++;
-        }
-      }
-
-      return {
-        r: rSum / pixelCount,
-        g: gSum / pixelCount,
-        b: bSum / pixelCount
-      };
-    };
-
-    // Compare blocks
     for (let y = 0; y < height; y += blockSize) {
       for (let x = 0; x < width; x += blockSize) {
-        const block1 = getBlockAverage(capturedImageData, x, y, blockSize);
-        const block2 = getBlockAverage(refImageData, x, y, blockSize);
+        let blockMatchSum = 0;
+        let blockPixels = 0;
 
-        // Calculate color difference using weighted RGB
-        const colorDiff = Math.sqrt(
-          Math.pow((block1.r - block2.r) * 0.3, 2) +
-          Math.pow((block1.g - block2.g) * 0.59, 2) +
-          Math.pow((block1.b - block2.b) * 0.11, 2)
-        );
+        for (let by = 0; by < blockSize && y + by < height; by++) {
+          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+            const i = ((y + by) * width + (x + bx)) * 4;
+            
+            const r1 = imgData1.data[i];
+            const g1 = imgData1.data[i + 1];
+            const b1 = imgData1.data[i + 2];
+            
+            const r2 = imgData2.data[i];
+            const g2 = imgData2.data[i + 1];
+            const b2 = imgData2.data[i + 2];
 
-        // Adjust threshold for better matching
-        if (colorDiff < 50) {
+            const hsv1 = rgbToHsv(r1, g1, b1);
+            const hsv2 = rgbToHsv(r2, g2, b2);
+
+            const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
+            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
+            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
+
+            const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
+            const satMatch = satDiff <= satTolerance ? 1 : 0;
+            const valMatch = valDiff <= valTolerance ? 1 : 0;
+
+            const pixelMatchScore = 
+              hueMatch * hueWeight +
+              satMatch * satWeight +
+              valMatch * valWeight;
+
+            blockMatchSum += pixelMatchScore;
+            blockPixels++;
+          }
+        }
+
+        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
           matchCount++;
         }
         totalBlocks++;
       }
     }
 
-    return Math.min(100, (matchCount / totalBlocks) * 100 * 1.2);
+    const rawPercentage = (matchCount / totalBlocks) * 100;
+    return Math.min(100, rawPercentage * 1.5);
   }, []);
 
-  // Load and process reference image
-  const loadReferenceImage = useCallback((imageUrl) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      const tempCanvas = document.createElement('canvas');
-      const tempContext = tempCanvas.getContext('2d');
-      
-      // Set canvas size to match video dimensions
-      if (videoRef.current) {
-        tempCanvas.width = videoRef.current.videoWidth || 640;
-        tempCanvas.height = videoRef.current.videoHeight || 480;
-      } else {
-        tempCanvas.width = 640;
-        tempCanvas.height = 480;
-      }
-
-      // Draw and store reference image data
-      tempContext.drawImage(img, 0, 0, tempCanvas.width, tempCanvas.height);
-      setReferenceImageData(tempContext.getImageData(0, 0, tempCanvas.width, tempCanvas.height));
-    };
-    img.src = imageUrl;
-  }, []);
-
-  // Capture and compare frame with improved handling
+  // Capture and compare frame
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !referenceImageData) return;
+    if (!videoRef.current || !canvasRef.current || !selectedMarker) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
-    // Ensure canvas matches video dimensions
+    // Set canvas dimensions to match video
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
-    // Capture and process frame
+    // Draw current video frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
-    
-    // Compare with stored reference image
-    const score = compareImages(capturedFrame, referenceImageData);
-    setMatchScore(score);
-  }, [compareImages, referenceImageData]);
 
-  // Start camera with error handling
+    // Create and load reference image
+    const refImg = new Image();
+    refImg.crossOrigin = "anonymous";  // Important for CORS
+    
+    refImg.onload = () => {
+      // Create temporary canvas for reference image
+      const tempCanvas = document.createElement('canvas');
+      const tempContext = tempCanvas.getContext('2d');
+      tempCanvas.width = canvas.width;
+      tempCanvas.height = canvas.height;
+      
+      // Draw reference image at same size as captured frame
+      tempContext.drawImage(refImg, 0, 0, canvas.width, canvas.height);
+      const referenceData = tempContext.getImageData(0, 0, canvas.width, canvas.height);
+      
+      // Compare and update score
+      const score = compareImages(capturedFrame, referenceData);
+      setMatchScore(score);
+    };
+
+    refImg.onerror = () => {
+      console.error('Error loading reference image');
+      setError('Error loading reference image');
+    };
+
+    refImg.src = selectedMarker.imageUrl;
+  }, [compareImages, selectedMarker]);
+
+  // Start camera
   const startCamera = useCallback(async () => {
     if (!selectedMarker) return;
 
     try {
-      const constraints = {
-        video: {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
           facingMode: 'environment',
           width: { ideal: 1280 },
           height: { ideal: 720 }
-        }
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        } 
+      });
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.onloadedmetadata = () => {
           setIsStreaming(true);
-          // Reload reference image with correct dimensions
-          if (selectedMarker?.imageUrl) {
-            loadReferenceImage(selectedMarker.imageUrl);
-          }
+          setError(null);
         };
       }
     } catch (err) {
+      setError('Unable to access camera. Please ensure camera permissions are granted.');
       console.error('Camera error:', err);
-      alert('Failed to access camera. Please ensure camera permissions are granted.');
     }
-  }, [selectedMarker, loadReferenceImage]);
+  }, [selectedMarker]);
 
   // Stop camera
   const stopCamera = useCallback(() => {
@@ -175,6 +204,12 @@ const ImageMatcher = () => {
       videoRef.current.srcObject = null;
       setIsStreaming(false);
     }
+  }, []);
+
+  // Get content key from URL
+  const getContentKey = useCallback(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get('key');
   }, []);
 
   // Firebase listener
@@ -196,27 +231,24 @@ const ImageMatcher = () => {
           ...snapshot.docs[0].data()
         };
         setSelectedMarker(markerData);
-        if (markerData.imageUrl) {
-          loadReferenceImage(markerData.imageUrl);
-        }
       }
     });
 
     return () => unsubscribe();
-  }, [getContentKey, loadReferenceImage]);
+  }, [getContentKey]);
 
   // Continuous capture interval
   useEffect(() => {
     let intervalId;
-    if (isStreaming && referenceImageData) {
-      intervalId = setInterval(captureFrame, 200); // Adjusted frequency
+    if (isStreaming && selectedMarker) {
+      intervalId = setInterval(captureFrame, 200);
     }
     return () => {
       if (intervalId) {
         clearInterval(intervalId);
       }
     };
-  }, [isStreaming, captureFrame, referenceImageData]);
+  }, [isStreaming, captureFrame, selectedMarker]);
 
   // Cleanup
   useEffect(() => {
@@ -228,6 +260,18 @@ const ImageMatcher = () => {
       <h1 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '20px', textAlign: 'center' }}>
         AR Image Matcher
       </h1>
+
+      {error && (
+        <div style={{ 
+          padding: '10px', 
+          backgroundColor: '#fee2e2', 
+          color: '#dc2626', 
+          borderRadius: '4px',
+          marginBottom: '20px' 
+        }}>
+          {error}
+        </div>
+      )}
 
       <div style={{
         display: 'grid',
@@ -254,6 +298,7 @@ const ImageMatcher = () => {
                 top: '0',
                 left: '0'
               }}
+              crossOrigin="anonymous"
             />
           )}
           <p style={{ 
