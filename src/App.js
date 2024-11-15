@@ -22,46 +22,6 @@ if (!getApps().length) {
 }
 const db = getFirestore(app);
 
-const ImageDisplay = ({ marker, isReferenceLoaded }) => {
-  return (
-    <div style={{
-      backgroundColor: '#f3f4f6',
-      borderRadius: '8px',
-      overflow: 'hidden',
-      aspectRatio: '16/9',
-      position: 'relative'
-    }}>
-      {marker && (
-        <>
-          <img
-            src={marker.imageUrl}
-            alt="Reference"
-            style={{ 
-              width: '100%', 
-              height: '100%', 
-              objectFit: 'cover'
-            }}
-            crossOrigin="anonymous"
-          />
-          {!isReferenceLoaded && (
-            <div style={{
-              position: 'absolute',
-              top: '50%',
-              left: '50%',
-              transform: 'translate(-50%, -50%)',
-              color: '#666',
-              textAlign: 'center'
-            }}>
-              Loading image for processing...
-            </div>
-          )}
-        </>
-      )}
-      <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
-    </div>
-  );
-};
-
 const ImageMatcher = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -71,16 +31,25 @@ const ImageMatcher = () => {
   const [selectedMarker, setSelectedMarker] = useState(null);
   const [contentKey, setContentKey] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
 
+  // Get content key from URL
   const getContentKey = useCallback(() => {
     const urlParams = new URLSearchParams(window.location.search);
     return urlParams.get('key');
   }, []);
 
-  const loadMarkerImage = useCallback((imageUrl) => {
-    if (!imageUrl) return;
+  // Load marker image with verification
+const loadMarkerImage = useCallback(async (imageUrl) => {
+  if (!imageUrl) {
+    setError('No image URL provided');
+    return;
+  }
 
+  return new Promise((resolve, reject) => {
     const img = new Image();
+    
+    // Set crossOrigin before setting src
     img.crossOrigin = "anonymous";
     
     img.onload = () => {
@@ -90,30 +59,67 @@ const ImageMatcher = () => {
       tempCanvas.height = img.height;
       
       const tempContext = tempCanvas.getContext('2d');
-      tempContext.drawImage(img, 0, 0);
       
-      // Try to access the image data
       try {
-        tempContext.getImageData(0, 0, img.width, img.height);
-        setReferenceImage(img);
-        setIsLoading(false);
-      } catch (e) {
-        console.log('Retrying image load with proxy...');
+        // Draw the image to the temporary canvas
+        tempContext.drawImage(img, 0, 0);
+        
+        // Try to access the image data to verify it's loaded correctly
+        try {
+          tempContext.getImageData(0, 0, img.width, img.height);
+          setReferenceImage(img);
+          setIsLoading(false);
+          setError(null);
+          resolve(img);
+        } catch (e) {
+          // If we can't access the image data, try with a proxy
+          const proxyUrl = `https://cors-anywhere.herokuapp.com/${imageUrl}`;
+          img.src = proxyUrl;
+        }
+      } catch (error) {
+        console.error('Error processing image:', error);
+        setError('Error processing image');
+        reject(error);
       }
     };
     
+    img.onerror = (error) => {
+      console.error('Error loading image:', error);
+      // Try loading with proxy if direct loading fails
+      const proxyUrl = `https://cors-anywhere.herokuapp.com/${imageUrl}`;
+      img.src = proxyUrl;
+    };
+    
+    // Set the source after setting up event handlers
     img.src = imageUrl;
-  }, []);
+  });
+}, []);
 
-  const handleMarkerSelect = useCallback((marker) => {
-    if (!marker?.imageUrl) return;
+  // Handle marker selection
+  const handleMarkerSelect = useCallback(async (marker) => {
+    if (!marker?.imageUrl) {
+      setError('Invalid marker data');
+      return;
+    }
+    
     setSelectedMarker(marker);
     setIsLoading(true);
-    loadMarkerImage(marker.imageUrl);
+    setError(null);
+    
+    try {
+      await loadMarkerImage(marker.imageUrl);
+    } catch (error) {
+      console.error('Error loading marker image:', error);
+      setIsLoading(false);
+    }
   }, [loadMarkerImage]);
 
+  // Compare images with improved error handling
   const compareImages = useCallback((imgData1, imgData2) => {
-    if (!imgData1 || !imgData2) return 0;
+    if (!imgData1 || !imgData2 || imgData1.width !== imgData2.width || imgData1.height !== imgData2.height) {
+      setError('Invalid image data for comparison');
+      return 0;
+    }
 
     const width = imgData1.width;
     const height = imgData1.height;
@@ -121,64 +127,83 @@ const ImageMatcher = () => {
     let matchCount = 0;
     let totalBlocks = 0;
 
-    for (let y = 0; y < height; y += blockSize) {
-      for (let x = 0; x < width; x += blockSize) {
-        let blockMatchSum = 0;
-        let blockPixels = 0;
+    try {
+      for (let y = 0; y < height; y += blockSize) {
+        for (let x = 0; x < width; x += blockSize) {
+          let blockMatchSum = 0;
+          let blockPixels = 0;
 
-        for (let by = 0; by < blockSize && y + by < height; by++) {
-          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-            const i = ((y + by) * width + (x + bx)) * 4;
-            
-            const r1 = imgData1.data[i];
-            const g1 = imgData1.data[i + 1];
-            const b1 = imgData1.data[i + 2];
-            
-            const r2 = imgData2.data[i];
-            const g2 = imgData2.data[i + 1];
-            const b2 = imgData2.data[i + 2];
+          for (let by = 0; by < blockSize && y + by < height; by++) {
+            for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+              const i = ((y + by) * width + (x + bx)) * 4;
+              
+              const r1 = imgData1.data[i];
+              const g1 = imgData1.data[i + 1];
+              const b1 = imgData1.data[i + 2];
+              
+              const r2 = imgData2.data[i];
+              const g2 = imgData2.data[i + 1];
+              const b2 = imgData2.data[i + 2];
 
-            const colorDiff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
-            const match = colorDiff < 150 ? 1 : 0;
+              const colorDiff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
+              const match = colorDiff < 150 ? 1 : 0;
 
-            blockMatchSum += match;
-            blockPixels++;
+              blockMatchSum += match;
+              blockPixels++;
+            }
           }
-        }
 
-        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
-          matchCount++;
+          if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
+            matchCount++;
+          }
+          totalBlocks++;
         }
-        totalBlocks++;
       }
-    }
 
-    return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
+      return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
+    } catch (error) {
+      setError('Error comparing images');
+      return 0;
+    }
   }, []);
 
+  // Capture and compare frame with improved error handling
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !referenceImage) return;
+    if (!videoRef.current || !canvasRef.current || !referenceImage) {
+      setError('Video or canvas not ready');
+      return;
+    }
 
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
+    try {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const context = canvas.getContext('2d');
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
 
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(referenceImage, 0, 0, canvas.width, canvas.height);
-    const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
-    
-    const score = compareImages(capturedFrame, referenceData);
-    setMatchScore(score);
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(referenceImage, 0, 0, canvas.width, canvas.height);
+      const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
+      
+      const score = compareImages(capturedFrame, referenceData);
+      setMatchScore(score);
+      setError(null);
+    } catch (error) {
+      console.error('Error capturing frame:', error);
+      setError('Error capturing frame');
+    }
   }, [compareImages, referenceImage]);
 
+  // Start camera with improved error handling
   const startCamera = useCallback(async () => {
-    if (!selectedMarker) return;
+    if (!selectedMarker) {
+      setError('No marker selected');
+      return;
+    }
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -192,12 +217,15 @@ const ImageMatcher = () => {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         setIsStreaming(true);
+        setError(null);
       }
     } catch (err) {
-      console.log('Camera error:', err);
+      console.error('Camera error:', err);
+      setError('Failed to access camera');
     }
   }, [selectedMarker]);
 
+  // Stop camera
   const stopCamera = useCallback(() => {
     if (videoRef.current?.srcObject) {
       videoRef.current.srcObject.getTracks().forEach(track => track.stop());
@@ -207,9 +235,13 @@ const ImageMatcher = () => {
     }
   }, []);
 
+  // Firebase listener
   useEffect(() => {
     const key = getContentKey();
-    if (!key) return;
+    if (!key) {
+      setError('No content key provided');
+      return;
+    }
 
     setContentKey(key);
     
@@ -220,19 +252,25 @@ const ImageMatcher = () => {
       where('isActive', '==', true)
     );
 
-    const unsubscribe = onSnapshot(markerQuery, (snapshot) => {
+    const unsubscribe = onSnapshot(markerQuery, async (snapshot) => {
       if (!snapshot.empty) {
         const markerData = {
           id: snapshot.docs[0].id,
           ...snapshot.docs[0].data()
         };
-        handleMarkerSelect(markerData);
+        await handleMarkerSelect(markerData);
+      } else {
+        setError('No active content found for this key');
       }
+    }, (error) => {
+      console.error('Firebase error:', error);
+      setError('Error loading content');
     });
 
     return () => unsubscribe();
   }, [getContentKey, handleMarkerSelect]);
 
+  // Capture interval
   useEffect(() => {
     let intervalId;
     if (isStreaming && referenceImage) {
@@ -241,6 +279,7 @@ const ImageMatcher = () => {
     return () => intervalId && clearInterval(intervalId);
   }, [isStreaming, captureFrame, referenceImage]);
 
+  // Cleanup
   useEffect(() => {
     return () => stopCamera();
   }, [stopCamera]);
@@ -250,6 +289,19 @@ const ImageMatcher = () => {
       <h1 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '20px', textAlign: 'center' }}>
         AR Image Matcher
       </h1>
+
+      {error && (
+        <div style={{ 
+          padding: '12px', 
+          backgroundColor: '#fee2e2', 
+          color: '#dc2626', 
+          borderRadius: '4px', 
+          marginBottom: '20px',
+          textAlign: 'center'
+        }}>
+          {error}
+        </div>
+      )}
 
       {isLoading && (
         <div style={{ textAlign: 'center', marginBottom: '20px', color: '#666' }}>
@@ -269,10 +321,21 @@ const ImageMatcher = () => {
         gap: '20px',
         marginBottom: '20px'
       }}>
-        <ImageDisplay 
-          marker={selectedMarker} 
-          isReferenceLoaded={!isLoading && referenceImage !== null} 
-        />
+        <div style={{
+          backgroundColor: '#f3f4f6',
+          borderRadius: '8px',
+          overflow: 'hidden',
+          aspectRatio: '16/9'
+        }}>
+          {selectedMarker && (
+            <img 
+              src={selectedMarker.imageUrl}
+              alt="Reference"
+              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+            />
+          )}
+          <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
+        </div>
         <div style={{
           backgroundColor: '#f3f4f6',
           borderRadius: '8px',
