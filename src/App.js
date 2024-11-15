@@ -28,7 +28,7 @@ const App = () => {
   const [matchScore, setMatchScore] = useState(0);
   const [imageLoaded, setImageLoaded] = useState(false);
 
-  // Compare frames using HSV
+  // Frame comparison using HSV values
   const compareFrames = useCallback((frame1, frame2) => {
     if (!frame1 || !frame2) return 0;
 
@@ -72,17 +72,16 @@ const App = () => {
   // Start video playback
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
-    
+
     try {
       overlayVideoRef.current.src = videoUrl;
-      overlayVideoRef.current.muted = false;
       await overlayVideoRef.current.play();
       setIsVideoPlaying(true);
       setDebugInfo('Video playing');
     } catch (error) {
       console.error('Video playback error:', error);
       setDebugInfo('Click to play video');
-      
+
       const playOnClick = () => {
         if (overlayVideoRef.current) {
           overlayVideoRef.current.play()
@@ -109,19 +108,14 @@ const App = () => {
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
-    // Set standard size for comparison
     canvas.width = 320;
     canvas.height = 240;
-
-    // Draw current frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const currentFrame = context.getImageData(0, 0, canvas.width, canvas.height);
-    
-    // Compare frames
+
     const score = compareFrames(currentFrame, processedImageRef.current);
     setMatchScore(score);
 
-    // Start video if good match
     if (score > 70 && !isVideoPlaying) {
       startVideo();
     }
@@ -133,8 +127,9 @@ const App = () => {
   const loadReferenceImage = useCallback(async (imageUrl) => {
     try {
       const response = await fetch(imageUrl, { mode: 'cors' });
-      const blob = await response.blob();
+      if (!response.ok) throw new Error('Failed to fetch image');
       
+      const blob = await response.blob();
       return new Promise((resolve, reject) => {
         const img = new Image();
         img.onload = () => {
@@ -226,7 +221,6 @@ const App = () => {
         setVideoUrl(data.videoUrl);
         await loadReferenceImage(data.imageUrl);
         setDebugInfo('Content loaded');
-
       } catch (error) {
         console.error('Content loading error:', error);
         setDebugInfo('Error: ' + error.message);
@@ -275,45 +269,16 @@ const App = () => {
       backgroundColor: 'rgba(0,0,0,0.7)',
       color: 'white',
       padding: '10px',
-      borderRadius: '5px',
-      zIndex: 30
+      borderRadius: '5px'
     }
   };
 
   return (
     <div style={styles.container}>
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
-        style={styles.video}
-      />
-
-      <canvas
-        ref={canvasRef}
-        style={styles.canvas}
-      />
-
-      {videoUrl && (
-        <video
-          ref={overlayVideoRef}
-          style={styles.overlayVideo}
-          autoPlay
-          playsInline
-          loop
-          muted={false}
-          controls={false}
-        />
-      )}
-
-      <div style={styles.debugInfo}>
-        <div>Status: {debugInfo}</div>
-        <div>Key: {contentKey || 'Not found'}</div>
-        <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
-        <div>Match Score: {matchScore.toFixed(1)}%</div>
-        <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
-      </div>
+      <video ref={videoRef} style={styles.video} autoPlay muted playsInline />
+      <canvas ref={canvasRef} style={styles.canvas} />
+      <video ref={overlayVideoRef} style={styles.overlayVideo} controls />
+      <div style={styles.debugInfo}>Debug Info: {debugInfo} | Match Score: {matchScore.toFixed(2)}</div>
     </div>
   );
 };
