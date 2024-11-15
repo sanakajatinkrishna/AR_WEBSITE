@@ -33,6 +33,7 @@ const ImageMatcher = () => {
   const [showVideo, setShowVideo] = useState(false);
   const [loading, setLoading] = useState(true);
   const [imageLoaded, setImageLoaded] = useState(false);
+  const [debugInfo, setDebugInfo] = useState('Initializing...');
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -48,28 +49,64 @@ const ImageMatcher = () => {
   const fetchContent = async (key) => {
     try {
       setLoading(true);
-      const q = query(collection(db, "arContent"), where("contentKey", "==", key));
-      const querySnapshot = await getDocs(q);
+      setDebugInfo('Verifying content...');
       
-      if (querySnapshot.empty) {
-        throw new Error('Content not found');
+      const arContentRef = collection(db, 'arContent');
+      const q = query(
+        arContentRef,
+        where('contentKey', '==', key),
+        where('isActive', '==', true)
+      );
+      
+      const snapshot = await getDocs(q);
+      
+      if (snapshot.empty) {
+        throw new Error('Content not found or inactive');
       }
 
-      const data = querySnapshot.docs[0].data();
+      const data = snapshot.docs[0].data();
       
       if (!data.imageUrl || !data.videoUrl) {
         throw new Error('Missing content URLs');
       }
 
+      console.log('Content found:', data);
       setVideoUrl(data.videoUrl);
       setImageUrl(data.imageUrl);
+      setDebugInfo('Content loaded - Please show image');
       setLoading(false);
     } catch (err) {
       console.error('Error fetching content:', err);
       setError(err.message);
+      setDebugInfo(`Error: ${err.message}`);
       setLoading(false);
     }
   };
+
+  const detectCanvas = useCallback((imageData) => {
+    const width = imageData.width;
+    const height = imageData.height;
+    
+    let totalR = 0, totalG = 0, totalB = 0;
+    let samples = 0;
+
+    for (let y = 0; y < height; y += 4) {
+      for (let x = 0; x < width; x += 4) {
+        const i = (y * width + x) * 4;
+        totalR += imageData.data[i];
+        totalG += imageData.data[i + 1];
+        totalB += imageData.data[i + 2];
+        samples++;
+      }
+    }
+
+    const avgR = totalR / samples;
+    const avgG = totalG / samples;
+    const avgB = totalB / samples;
+
+    return (avgR > 30 || avgG > 30 || avgB > 30) && 
+           (avgR < 240 || avgG < 240 || avgB < 240);
+  }, []);
 
   const compareImages = useCallback((imgData1, imgData2) => {
     const width = imgData1.width;
@@ -112,11 +149,14 @@ const ImageMatcher = () => {
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        await videoRef.current.play();
         setIsStreaming(true);
         setError(null);
+        setDebugInfo('Camera ready - Show image');
       }
     } catch (err) {
       setError('Unable to access camera. Please check permissions.');
+      setDebugInfo(`Camera error: ${err.message}`);
       console.error('Camera error:', err);
     }
   };
@@ -126,23 +166,28 @@ const ImageMatcher = () => {
       videoRef.current.srcObject.getTracks().forEach(track => track.stop());
       videoRef.current.srcObject = null;
       setIsStreaming(false);
+      setDebugInfo('Camera stopped');
     }
   }, []);
 
   useEffect(() => {
-    let intervalId;
+    let animationFrameId;
+    
     if (isStreaming && imageLoaded) {
-      intervalId = setInterval(() => {
+      const processFrame = () => {
         if (!videoRef.current || !canvasRef.current) return;
 
         const canvas = canvasRef.current;
-        const context = canvas.getContext('2d');
+        const context = canvas.getContext('2d', { 
+          willReadFrequently: true,
+          alpha: false 
+        });
         const video = videoRef.current;
 
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
 
-        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        context.drawImage(video, 0, 0);
         const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
         const img = new Image();
@@ -152,23 +197,31 @@ const ImageMatcher = () => {
           context.drawImage(img, 0, 0, canvas.width, canvas.height);
           const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
 
-          const score = compareImages(capturedFrame, referenceData);
-          setMatchScore(score);
-          
-          if (score > 70) {
-            setShowVideo(true);
-            stopCamera();
+          if (detectCanvas(capturedFrame)) {
+            const score = compareImages(capturedFrame, referenceData);
+            setMatchScore(score);
+            
+            if (score > 70) {
+              setShowVideo(true);
+              stopCamera();
+              setDebugInfo('Match found! Playing video...');
+            }
           }
         };
         img.src = imageUrl;
-      }, 500);
+
+        animationFrameId = requestAnimationFrame(processFrame);
+      };
+
+      processFrame();
     }
+
     return () => {
-      if (intervalId) {
-        clearInterval(intervalId);
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
       }
     };
-  }, [isStreaming, imageUrl, imageLoaded, compareImages, stopCamera]);
+  }, [isStreaming, imageUrl, imageLoaded, detectCanvas, compareImages, stopCamera]);
 
   useEffect(() => {
     return () => stopCamera();
@@ -210,6 +263,7 @@ const ImageMatcher = () => {
                 loop
                 controls
                 playsInline
+                muted={false}
               />
             ) : (
               <>
@@ -218,6 +272,7 @@ const ImageMatcher = () => {
                   className="w-full h-full object-cover"
                   autoPlay
                   playsInline
+                  muted
                 />
                 <canvas
                   ref={canvasRef}
@@ -229,6 +284,14 @@ const ImageMatcher = () => {
               {showVideo ? "AR Content" : "Camera Feed"}
             </p>
           </div>
+        </div>
+
+        <div className="bg-gray-100 p-4 rounded-lg mb-4">
+          <h3 className="font-semibold mb-2">Status: {debugInfo}</h3>
+          <div>Image URL: {imageUrl ? 'Loaded' : 'Not loaded'}</div>
+          <div>Video URL: {videoUrl ? 'Loaded' : 'Not loaded'}</div>
+          <div>Camera: {isStreaming ? 'Active' : 'Inactive'}</div>
+          <div>Image Loaded: {imageLoaded ? 'Yes' : 'No'}</div>
         </div>
 
         {!showVideo && imageLoaded && (
