@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getFirestore, collection, query, where, onSnapshot } from 'firebase/firestore';
 
+// Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -24,56 +25,60 @@ const db = getFirestore(app);
 const ImageMatcher = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const referenceCanvasRef = useRef(null);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [matchScore, setMatchScore] = useState(0);
+  const [matchScore, setMatchScore] = useState(null);
+  const [referenceImage, setReferenceImage] = useState(null);
   const [selectedMarker, setSelectedMarker] = useState(null);
-  const [error, setError] = useState(null);
-  const [isReferenceImageLoaded, setIsReferenceImageLoaded] = useState(false);
+  const [contentKey, setContentKey] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  // Load reference image
-  const loadReferenceImage = useCallback(async (imageUrl) => {
+  // Get content key from URL
+  const getContentKey = useCallback(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get('key');
+  }, []);
+
+  // Load marker image
+  const loadMarkerImage = useCallback(async (imageUrl) => {
+    if (!imageUrl) return;
+
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.crossOrigin = "anonymous";
       
       img.onload = () => {
-        if (referenceCanvasRef.current) {
-          const refCanvas = referenceCanvasRef.current;
-          refCanvas.width = img.width;
-          refCanvas.height = img.height;
-          const refContext = refCanvas.getContext('2d');
-          refContext.drawImage(img, 0, 0);
-          setIsReferenceImageLoaded(true);
-          setError(null);
-          resolve(true);
-        }
+        setReferenceImage(img);
+        setIsLoading(false);
+        resolve(img);
       };
-
+      
       img.onerror = () => {
-        setError('Failed to load reference image. Please check the URL and CORS settings.');
-        setIsReferenceImageLoaded(false);
-        reject(new Error('Failed to load reference image'));
+        reject(new Error('Failed to load image'));
       };
-
+      
       img.src = imageUrl;
     });
   }, []);
 
-  // Compare images
-  const compareImages = useCallback((capturedFrame) => {
-    if (!referenceCanvasRef.current || !isReferenceImageLoaded) return 0;
-
-    const width = capturedFrame.width;
-    const height = capturedFrame.height;
-    const blockSize = 8;
-    const tolerance = 30;
+  // Handle marker selection
+  const handleMarkerSelect = useCallback(async (marker) => {
+    if (!marker?.imageUrl) return;
     
+    setSelectedMarker(marker);
+    try {
+      await loadMarkerImage(marker.imageUrl);
+    } catch (error) {
+      console.error('Error loading marker image:', error);
+    }
+  }, [loadMarkerImage]);
+
+  // Compare images
+  const compareImages = useCallback((imgData1, imgData2) => {
+    const width = imgData1.width;
+    const height = imgData1.height;
+    const blockSize = 8;
     let matchCount = 0;
     let totalBlocks = 0;
-
-    const refContext = referenceCanvasRef.current.getContext('2d');
-    const referenceFrame = refContext.getImageData(0, 0, width, height);
 
     for (let y = 0; y < height; y += blockSize) {
       for (let x = 0; x < width; x += blockSize) {
@@ -84,11 +89,18 @@ const ImageMatcher = () => {
           for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
             const i = ((y + by) * width + (x + bx)) * 4;
             
-            const diff = Math.abs(capturedFrame.data[i] - referenceFrame.data[i]) +
-                        Math.abs(capturedFrame.data[i + 1] - referenceFrame.data[i + 1]) +
-                        Math.abs(capturedFrame.data[i + 2] - referenceFrame.data[i + 2]);
+            const r1 = imgData1.data[i];
+            const g1 = imgData1.data[i + 1];
+            const b1 = imgData1.data[i + 2];
+            
+            const r2 = imgData2.data[i];
+            const g2 = imgData2.data[i + 1];
+            const b2 = imgData2.data[i + 2];
 
-            blockMatchSum += diff < tolerance * 3 ? 1 : 0;
+            const colorDiff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
+            const match = colorDiff < 150 ? 1 : 0;
+
+            blockMatchSum += match;
             blockPixels++;
           }
         }
@@ -101,11 +113,11 @@ const ImageMatcher = () => {
     }
 
     return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
-  }, [isReferenceImageLoaded]);
+  }, []);
 
-  // Capture frame
+  // Capture and compare frame
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !isReferenceImageLoaded) return;
+    if (!videoRef.current || !canvasRef.current || !referenceImage) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -113,12 +125,17 @@ const ImageMatcher = () => {
 
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
+
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
-    const score = compareImages(capturedFrame);
+
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(referenceImage, 0, 0, canvas.width, canvas.height);
+    const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
+    
+    const score = compareImages(capturedFrame, referenceData);
     setMatchScore(score);
-  }, [compareImages, isReferenceImageLoaded]);
+  }, [compareImages, referenceImage]);
 
   // Start camera
   const startCamera = useCallback(async () => {
@@ -135,43 +152,28 @@ const ImageMatcher = () => {
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current.play();
-          setIsStreaming(true);
-          setError(null);
-        };
+        setIsStreaming(true);
       }
     } catch (err) {
       console.error('Camera error:', err);
-      setError('Unable to access camera. Please ensure camera permissions are granted.');
-      setIsStreaming(false);
     }
   }, [selectedMarker]);
 
   // Stop camera
   const stopCamera = useCallback(() => {
     if (videoRef.current?.srcObject) {
-      const tracks = videoRef.current.srcObject.getTracks();
-      tracks.forEach(track => track.stop());
+      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
       videoRef.current.srcObject = null;
+      setIsStreaming(false);
     }
-    setIsStreaming(false);
-    setMatchScore(0);
-  }, []);
-
-  // Get content key from URL
-  const getContentKey = useCallback(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    return urlParams.get('key');
   }, []);
 
   // Firebase listener
   useEffect(() => {
     const key = getContentKey();
-    if (!key) {
-      setError('No content key provided');
-      return;
-    }
+    if (!key) return;
+
+    setContentKey(key);
     
     const arContentRef = collection(db, 'arContent');
     const markerQuery = query(
@@ -180,137 +182,128 @@ const ImageMatcher = () => {
       where('isActive', '==', true)
     );
 
-    const unsubscribe = onSnapshot(markerQuery, 
-      (snapshot) => {
-        if (!snapshot.empty) {
-          const markerData = {
-            id: snapshot.docs[0].id,
-            ...snapshot.docs[0].data()
-          };
-          setSelectedMarker(markerData);
-          setError(null);
-        } else {
-          setError('No active content found');
-          setSelectedMarker(null);
-        }
-      },
-      (err) => {
-        console.error('Firebase query error:', err);
-        setError('Failed to fetch content data');
-        setSelectedMarker(null);
+    const unsubscribe = onSnapshot(markerQuery, async (snapshot) => {
+      if (!snapshot.empty) {
+        const markerData = {
+          id: snapshot.docs[0].id,
+          ...snapshot.docs[0].data()
+        };
+        await handleMarkerSelect(markerData);
       }
-    );
+    });
 
     return () => unsubscribe();
-  }, [getContentKey]);
-
-  // Load reference image when marker changes
-  useEffect(() => {
-    if (selectedMarker?.imageUrl) {
-      loadReferenceImage(selectedMarker.imageUrl).catch(() => {
-        stopCamera();
-      });
-    } else {
-      setIsReferenceImageLoaded(false);
-      stopCamera();
-    }
-  }, [selectedMarker, loadReferenceImage, stopCamera]);
+  }, [getContentKey, handleMarkerSelect]);
 
   // Capture interval
   useEffect(() => {
     let intervalId;
-    if (isStreaming && isReferenceImageLoaded) {
-      intervalId = setInterval(captureFrame, 200);
+    if (isStreaming && referenceImage) {
+      intervalId = setInterval(captureFrame, 500);
     }
-    return () => {
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
-    };
-  }, [isStreaming, captureFrame, isReferenceImageLoaded]);
+    return () => intervalId && clearInterval(intervalId);
+  }, [isStreaming, captureFrame, referenceImage]);
 
-  // Cleanup on unmount
+  // Cleanup
   useEffect(() => {
     return () => stopCamera();
   }, [stopCamera]);
 
   return (
-    <div className="max-w-4xl mx-auto p-5">
-      <h1 className="text-2xl font-bold mb-5 text-center">
+    <div style={{ maxWidth: '800px', margin: '0 auto', padding: '20px' }}>
+      <h1 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '20px', textAlign: 'center' }}>
         AR Image Matcher
       </h1>
 
-      {error && (
-        <div className="p-3 mb-5 bg-red-100 text-red-600 rounded-md">
-          {error}
+      {isLoading && (
+        <div style={{ textAlign: 'center', marginBottom: '20px', color: '#666' }}>
+          Loading marker image...
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
-        <div className="bg-gray-100 rounded-lg overflow-hidden aspect-video relative">
-          {selectedMarker?.imageUrl ? (
+      {contentKey && !isLoading && (
+        <div style={{ textAlign: 'center', marginBottom: '20px', color: '#666' }}>
+          <p>Content Key: {contentKey}</p>
+        </div>
+      )}
+
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr',
+        gap: '20px',
+        marginBottom: '20px'
+      }}>
+        <div style={{
+          backgroundColor: '#f3f4f6',
+          borderRadius: '8px',
+          overflow: 'hidden',
+          aspectRatio: '16/9'
+        }}>
+          {selectedMarker && (
             <img 
               src={selectedMarker.imageUrl}
               alt="Reference"
-              className="w-full h-full object-contain absolute inset-0"
-              crossOrigin="anonymous"
+              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
             />
-          ) : (
-            <div className="absolute inset-0 flex items-center justify-center text-gray-500">
-              No reference image
-            </div>
           )}
-          <p className="absolute bottom-0 w-full text-center bg-white/80 py-1">
-            Reference Image
-          </p>
+          <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
         </div>
-
-        <div className="bg-gray-100 rounded-lg overflow-hidden aspect-video relative">
+        <div style={{
+          backgroundColor: '#f3f4f6',
+          borderRadius: '8px',
+          overflow: 'hidden',
+          aspectRatio: '16/9'
+        }}>
           <video
             ref={videoRef}
-            className="w-full h-full object-cover"
+            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
             autoPlay
             playsInline
           />
           <canvas
             ref={canvasRef}
-            className="hidden"
+            style={{ display: 'none' }}
           />
-          <canvas
-            ref={referenceCanvasRef}
-            className="hidden"
-          />
-          <p className="absolute bottom-0 w-full text-center bg-white/80 py-1">
-            Camera Feed
-          </p>
+          <p style={{ textAlign: 'center', marginTop: '8px' }}>Camera Feed</p>
         </div>
       </div>
 
-      <div className="text-center mb-5">
-        <button
-          onClick={isStreaming ? stopCamera : startCamera}
-          disabled={!selectedMarker || !isReferenceImageLoaded}
-          className={`px-4 py-2 rounded-md text-white ${
-            isStreaming 
-              ? 'bg-red-600 hover:bg-red-700' 
-              : 'bg-blue-600 hover:bg-blue-700'
-          } ${(!selectedMarker || !isReferenceImageLoaded) ? 'opacity-50 cursor-not-allowed' : ''}`}
-        >
-          {isStreaming ? "Stop Camera" : "Start Camera"}
-        </button>
+      <div style={{ marginBottom: '20px', textAlign: 'center' }}>
+        {!isLoading && (
+          <button
+            onClick={isStreaming ? stopCamera : startCamera}
+            disabled={!selectedMarker}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: isStreaming ? '#dc2626' : '#3b82f6',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: selectedMarker ? 'pointer' : 'not-allowed',
+              opacity: selectedMarker ? 1 : 0.5
+            }}
+          >
+            {isStreaming ? "Stop Camera" : "Start Camera"}
+          </button>
+        )}
       </div>
 
-      <div className="fixed bottom-5 left-1/2 -translate-x-1/2 w-[90%] max-w-md">
-        <div className="bg-gray-100 rounded-lg p-4 text-center shadow-md">
-          <h3 className="text-lg font-bold mb-2">
+      {matchScore !== null && (
+        <div style={{
+          padding: '16px',
+          backgroundColor: '#f3f4f6',
+          borderRadius: '8px',
+          textAlign: 'center'
+        }}>
+          <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '8px' }}>
             Match Score: {matchScore.toFixed(1)}%
           </h3>
-          <p className="text-gray-600">
+          <p style={{ color: '#4b5563' }}>
             {matchScore > 70 ? "It's a match!" : 
              matchScore > 40 ? "Partial match" : "No match found"}
           </p>
         </div>
-      </div>
+      )}
     </div>
   );
 };
