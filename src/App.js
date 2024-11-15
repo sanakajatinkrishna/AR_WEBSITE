@@ -15,6 +15,74 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
+// Storage utility functions
+const LOCAL_STORAGE_PREFIX = 'ar_content_';
+
+const storeImage = async (key, imageUrl) => {
+  const storageKey = `${LOCAL_STORAGE_PREFIX}${key}`;
+  
+  try {
+    // Check if image is already stored
+    const storedData = localStorage.getItem(storageKey);
+    if (storedData) {
+      // Validate stored data is a valid base64 image
+      if (storedData.startsWith('data:image/')) {
+        return storedData;
+      }
+      localStorage.removeItem(storageKey); // Remove invalid data
+    }
+
+    // Fetch and store image
+    const response = await fetch(imageUrl);
+    if (!response.ok) throw new Error('Failed to fetch image');
+    
+    const blob = await response.blob();
+    
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      
+      reader.onloadend = () => {
+        try {
+          localStorage.setItem(storageKey, reader.result);
+          resolve(reader.result);
+        } catch (e) {
+          if (e.name === 'QuotaExceededError') {
+            // Clear old items if storage is full
+            clearOldStorage();
+            try {
+              localStorage.setItem(storageKey, reader.result);
+              resolve(reader.result);
+            } catch (retryError) {
+              reject(retryError);
+            }
+          } else {
+            reject(e);
+          }
+        }
+      };
+      
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  } catch (error) {
+    console.error('Storage error:', error);
+    return imageUrl; // Fallback to original URL
+  }
+};
+
+const clearOldStorage = () => {
+  const keysToKeep = new Set();
+  const currentKey = new URLSearchParams(window.location.search).get('key');
+  if (currentKey) keysToKeep.add(`${LOCAL_STORAGE_PREFIX}${currentKey}`);
+
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key.startsWith(LOCAL_STORAGE_PREFIX) && !keysToKeep.has(key)) {
+      localStorage.removeItem(key);
+    }
+  }
+};
+
 const App = () => {
   const contentKey = new URLSearchParams(window.location.search).get('key');
   const videoRef = useRef(null);
@@ -28,6 +96,7 @@ const App = () => {
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
   const [imageUrl, setImageUrl] = useState(null);
+  const [originalImageUrl, setOriginalImageUrl] = useState(null);
   const [canvasPosition, setCanvasPosition] = useState({ x: 50, y: 50 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [isCanvasDetected, setIsCanvasDetected] = useState(false);
@@ -128,7 +197,7 @@ const App = () => {
       img.onload = () => {
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
-        canvas.width = 320;  // Standardize size for comparison
+        canvas.width = 320;
         canvas.height = 240;
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         referenceImageRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -170,7 +239,6 @@ const App = () => {
   const detectCanvas = useCallback((imageData) => {
     if (!referenceImageRef.current || !imageData) return { detected: false };
 
-    // Create scaled version of captured frame
     const tempCanvas = document.createElement('canvas');
     const tempCtx = tempCanvas.getContext('2d');
     tempCanvas.width = 320;
@@ -193,7 +261,6 @@ const App = () => {
     
     const score = compareImages(scaledImageData, referenceImageRef.current);
     setMatchScore(score);
-    console.log('Match score:', score);
 
     if (score > 70) {
       let left = imageData.width, right = 0, top = imageData.height, bottom = 0;
@@ -311,8 +378,14 @@ const App = () => {
         const data = doc.data();
 
         setVideoUrl(data.videoUrl);
-        setImageUrl(data.imageUrl);
-        await loadReferenceImage(data.imageUrl);
+        setOriginalImageUrl(data.imageUrl);
+
+        // Store and load image from local storage
+// Store and load image from local storage
+        const storedImageUrl = await storeImage(contentKey, data.imageUrl);
+        setImageUrl(storedImageUrl);
+        await loadReferenceImage(storedImageUrl);
+        
         setDebugInfo('Content loaded - Please show image');
 
       } catch (error) {
@@ -480,7 +553,18 @@ const App = () => {
 
       {imageUrl && (
         <div style={styles.imagePreview}>
-          <img src={imageUrl} alt="Target" style={styles.previewImage} />
+          <img 
+            src={imageUrl} 
+            alt="Target" 
+            style={styles.previewImage}
+            onError={(e) => {
+              // Fallback to original URL if stored image fails to load
+              if (originalImageUrl) {
+                e.target.src = originalImageUrl;
+                console.log('Falling back to original image URL');
+              }
+            }}
+          />
         </div>
       )}
     </div>
