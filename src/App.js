@@ -25,7 +25,6 @@ const db = getFirestore(app);
 const ImageMatcher = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const markerImageRef = useRef(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(null);
   const [selectedMarker, setSelectedMarker] = useState(null);
@@ -38,72 +37,94 @@ const ImageMatcher = () => {
   }, []);
 
   // Compare images
-  const compareImages = useCallback((imgData1, imgData2) => {
-    const width = imgData1.width;
-    const height = imgData1.height;
-    const blockSize = 8;
-    let matchCount = 0;
-    let totalBlocks = 0;
+  const compareImages = useCallback((capturedImageData, referenceImageData) => {
+    try {
+      const width = capturedImageData.width;
+      const height = capturedImageData.height;
+      const blockSize = 8;
+      let matchCount = 0;
+      let totalBlocks = 0;
 
-    for (let y = 0; y < height; y += blockSize) {
-      for (let x = 0; x < width; x += blockSize) {
-        let blockMatchSum = 0;
-        let blockPixels = 0;
+      for (let y = 0; y < height; y += blockSize) {
+        for (let x = 0; x < width; x += blockSize) {
+          let blockMatchSum = 0;
+          let blockPixels = 0;
 
-        for (let by = 0; by < blockSize && y + by < height; by++) {
-          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-            const i = ((y + by) * width + (x + bx)) * 4;
-            
-            const r1 = imgData1.data[i];
-            const g1 = imgData1.data[i + 1];
-            const b1 = imgData1.data[i + 2];
-            
-            const r2 = imgData2.data[i];
-            const g2 = imgData2.data[i + 1];
-            const b2 = imgData2.data[i + 2];
+          for (let by = 0; by < blockSize && y + by < height; by++) {
+            for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+              const i = ((y + by) * width + (x + bx)) * 4;
+              
+              const r1 = capturedImageData.data[i];
+              const g1 = capturedImageData.data[i + 1];
+              const b1 = capturedImageData.data[i + 2];
+              
+              const r2 = referenceImageData.data[i];
+              const g2 = referenceImageData.data[i + 1];
+              const b2 = referenceImageData.data[i + 2];
 
-            const colorDiff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
-            const match = colorDiff < 150 ? 1 : 0;
+              const colorDiff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
+              const match = colorDiff < 150 ? 1 : 0;
 
-            blockMatchSum += match;
-            blockPixels++;
+              blockMatchSum += match;
+              blockPixels++;
+            }
           }
-        }
 
-        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
-          matchCount++;
+          if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
+            matchCount++;
+          }
+          totalBlocks++;
         }
-        totalBlocks++;
       }
-    }
 
-    return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
+      const score = Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
+      return score;
+    } catch (error) {
+      console.error('Error in compareImages:', error);
+      return 0;
+    }
   }, []);
 
   // Capture and compare frame
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !markerImageRef.current) return;
+    if (!videoRef.current || !canvasRef.current || !selectedMarker) return;
 
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
+    try {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const context = canvas.getContext('2d');
 
-    // Set canvas size to match video
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+      // Set canvas size to match video
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
 
-    // Draw and capture current video frame
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+      // Draw and capture video frame
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
-    // Draw and capture marker image
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(markerImageRef.current, 0, 0, canvas.width, canvas.height);
-    const markerData = context.getImageData(0, 0, canvas.width, canvas.height);
-    
-    const score = compareImages(capturedFrame, markerData);
-    setMatchScore(score);
-  }, [compareImages]);
+      // Create temporary canvas for reference image
+      const tempCanvas = document.createElement('canvas');
+      const tempContext = tempCanvas.getContext('2d');
+      tempCanvas.width = canvas.width;
+      tempCanvas.height = canvas.height;
+
+      // Create and load reference image
+      const referenceImg = new Image();
+      referenceImg.crossOrigin = "anonymous";
+      referenceImg.onload = () => {
+        // Draw reference image to temp canvas
+        tempContext.drawImage(referenceImg, 0, 0, canvas.width, canvas.height);
+        const referenceFrame = tempContext.getImageData(0, 0, canvas.width, canvas.height);
+        
+        // Compare images and update score
+        const score = compareImages(capturedFrame, referenceFrame);
+        setMatchScore(score);
+      };
+      referenceImg.src = selectedMarker.imageUrl;
+    } catch (error) {
+      console.error('Error in captureFrame:', error);
+    }
+  }, [compareImages, selectedMarker]);
 
   // Start camera
   const startCamera = useCallback(async () => {
@@ -133,6 +154,7 @@ const ImageMatcher = () => {
       videoRef.current.srcObject.getTracks().forEach(track => track.stop());
       videoRef.current.srcObject = null;
       setIsStreaming(false);
+      setMatchScore(null);
     }
   }, []);
 
@@ -169,7 +191,11 @@ const ImageMatcher = () => {
     if (isStreaming && selectedMarker) {
       intervalId = setInterval(captureFrame, 500);
     }
-    return () => intervalId && clearInterval(intervalId);
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
   }, [isStreaming, captureFrame, selectedMarker]);
 
   // Cleanup
@@ -203,10 +229,10 @@ const ImageMatcher = () => {
         }}>
           {selectedMarker && (
             <img 
-              ref={markerImageRef}
               src={selectedMarker.imageUrl}
               alt="Reference"
               style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              crossOrigin="anonymous"
             />
           )}
           <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
