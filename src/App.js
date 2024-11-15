@@ -54,46 +54,57 @@ const ImageMatcher = () => {
   }, []);
 
   // Fetch image from Firebase
-  const fetchReferenceImage = async (key) => {
-    try {
-      setLoading(true);
-      const q = query(collection(db, "arContent"), where("contentKey", "==", key));
-      const querySnapshot = await getDocs(q);
-      
-      if (querySnapshot.empty) {
-        throw new Error('Content not found');
-      }
-
-      const document = querySnapshot.docs[0];
-      const data = document.data();
-      
-      if (!data.imageUrl || !data.videoUrl) {
-        throw new Error('Missing content URLs');
-      }
-
-      setDocId(document.id);
-      setVideoUrl(data.videoUrl);
-
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      
-      // Create promise for image loading
-      const imageLoadPromise = new Promise((resolve, reject) => {
-        img.onload = () => resolve(img);
-        img.onerror = () => reject(new Error('Failed to load image'));
-      });
-
-      img.src = data.imageUrl;
-      const loadedImage = await imageLoadPromise;
-      setReferenceImage(loadedImage);
-      setLoading(false);
-
-    } catch (err) {
-      console.error('Error fetching content:', err);
-      setError(err.message);
-      setLoading(false);
+const fetchReferenceImage = async (key) => {
+  try {
+    setLoading(true);
+    const q = query(collection(db, "arContent"), where("contentKey", "==", key));
+    const querySnapshot = await getDocs(q);
+    
+    if (querySnapshot.empty) {
+      throw new Error('Content not found');
     }
-  };
+
+    const document = querySnapshot.docs[0];
+    const data = document.data();
+    
+    if (!data.imageUrl || !data.videoUrl) {
+      throw new Error('Missing content URLs');
+    }
+
+    setDocId(document.id);
+    setVideoUrl(data.videoUrl);
+
+    // Fetch and create image with CORS headers
+    const response = await fetch(data.imageUrl, {
+      mode: 'cors',
+      headers: {
+        'Access-Control-Allow-Origin': '*'
+      }
+    });
+
+    const blob = await response.blob();
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    
+    const imageLoadPromise = new Promise((resolve, reject) => {
+      img.onload = () => resolve(img);
+      img.onerror = (e) => {
+        console.error('Image load error:', e);
+        reject(new Error('Failed to load image'));
+      }
+    });
+
+    img.src = URL.createObjectURL(blob);
+    const loadedImage = await imageLoadPromise;
+    setReferenceImage(loadedImage);
+    setLoading(false);
+
+  } catch (err) {
+    console.error('Error fetching content:', err);
+    setError(err.message);
+    setLoading(false);
+  }
+};
 
   // RGB to HSV conversion for image comparison
   const rgbToHsv = useCallback((r, g, b) => {
