@@ -1,298 +1,298 @@
-import React, { useState, useEffect, useRef,useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
-import * as tf from '@tensorflow/tfjs';
-import '@tensorflow/tfjs-backend-webgl';
-import * as mobilenet from '@tensorflow-models/mobilenet';
+import { getFirestore, collection, query, where, getDocs, updateDoc, doc, increment } from 'firebase/firestore';
 
-// Initialize Firebase with your config
 const firebaseConfig = {
-apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
-authDomain: "app-1238f.firebaseapp.com",
-projectId: "app-1238f",
-storageBucket: "app-1238f.appspot.com",
-messagingSenderId: "12576842624",
-appId: "1:12576842624:web:92eb40fd8c56a9fc475765",
-measurementId: "G-N5Q9K9G3JN"
+  apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
+  authDomain: "app-1238f.firebaseapp.com",
+  projectId: "app-1238f",
+  storageBucket: "app-1238f.appspot.com",
+  messagingSenderId: "12576842624",
+  appId: "1:12576842624:web:92eb40fd8c56a9fc475765",
+  measurementId: "G-N5Q9K9G3JN"
 };
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-const ARViewer = () => {
+const ImageMatcher = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  const overlayVideoRef = useRef(null);
-  const [model, setModel] = useState(null);
-  const [targetImage, setTargetImage] = useState(null);
-  const [arVideo, setArVideo] = useState(null);
-  const [isMatching, setIsMatching] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [matchScore, setMatchScore] = useState(null);
   const [error, setError] = useState(null);
-  const [modelLoaded, setModelLoaded] = useState(false);
-  const [cameraReady, setCameraReady] = useState(false);
+  const [referenceImage, setReferenceImage] = useState(null);
+  const [docId, setDocId] = useState(null);
+  const [videoUrl, setVideoUrl] = useState(null);
+  const [showVideo, setShowVideo] = useState(false);
 
-  // Get content key from URL parameters
-  const urlParams = new URLSearchParams(window.location.search);
-  const contentKey = urlParams.get('key');
+  const rgbToHsv = useCallback((r, g, b) => {
+    r /= 255;
+    g /= 255;
+    b /= 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const diff = max - min;
+    let h = 0;
+    let s = max === 0 ? 0 : diff / max;
+    let v = max;
 
-  // Initialize TensorFlow and load MobileNet model
-  useEffect(() => {
-    const initTF = async () => {
-      try {
-        console.log('Loading TensorFlow...');
-        await tf.ready();
-        console.log('TensorFlow ready, loading MobileNet...');
-        const loadedModel = await mobilenet.load();
-        console.log('MobileNet loaded');
-        setModel(loadedModel);
-        setModelLoaded(true);
-      } catch (err) {
-        console.error('TensorFlow initialization error:', err);
-        setError('Failed to initialize TensorFlow: ' + err.message);
+    if (diff !== 0) {
+      switch (max) {
+        case r: 
+          h = 60 * ((g - b) / diff + (g < b ? 6 : 0)); 
+          break;
+        case g: 
+          h = 60 * ((b - r) / diff + 2); 
+          break;
+        case b: 
+          h = 60 * ((r - g) / diff + 4); 
+          break;
+        default:
+          break;
       }
-    };
-
-    initTF();
+    }
+    return [h, s * 100, v * 100];
   }, []);
 
-  // Fetch content from Firebase
-  useEffect(() => {
-    const fetchContent = async () => {
-      if (!contentKey) {
-        setError('No content key provided');
-        return;
-      }
+  const compareImages = useCallback((imgData1, imgData2) => {
+    const width = imgData1.width;
+    const height = imgData1.height;
+    const blockSize = 8;
+    let matchCount = 0;
+    let totalBlocks = 0;
 
-      try {
-        console.log('Fetching content for key:', contentKey);
-        const q = query(
-          collection(db, 'arContent'),
-          where('contentKey', '==', contentKey),
-          where('isActive', '==', true)
-        );
+    for (let y = 0; y < height; y += blockSize) {
+      for (let x = 0; x < width; x += blockSize) {
+        let blockMatchSum = 0;
+        let blockPixels = 0;
 
-        const querySnapshot = await getDocs(q);
-        if (querySnapshot.empty) {
-          setError('Content not found');
-          return;
-        }
+        for (let by = 0; by < blockSize && y + by < height; by++) {
+          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+            const i = ((y + by) * width + (x + bx)) * 4;
+            
+            const hsv1 = rgbToHsv(
+              imgData1.data[i],
+              imgData1.data[i + 1],
+              imgData1.data[i + 2]
+            );
+            
+            const hsv2 = rgbToHsv(
+              imgData2.data[i],
+              imgData2.data[i + 1],
+              imgData2.data[i + 2]
+            );
 
-        const content = querySnapshot.docs[0].data();
-        console.log('Content fetched:', content);
-        setTargetImage(content.imageUrl);
-        setArVideo(content.videoUrl);
-      } catch (err) {
-        console.error('Firebase fetch error:', err);
-        setError('Failed to fetch content: ' + err.message);
-      }
-    };
+            const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
+            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
+            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
 
-    fetchContent();
-  }, [contentKey]);
-
-  // Initialize camera
-  useEffect(() => {
-    let stream = null;
-
-    const initCamera = async () => {
-      try {
-        console.log('Requesting camera access...');
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { 
-            facingMode: 'environment',
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
+            if ((hueDiff <= 30 || hueDiff >= 330) && satDiff <= 30 && valDiff <= 30) {
+              blockMatchSum++;
+            }
+            blockPixels++;
           }
-        });
-        
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.onloadedmetadata = () => {
-            console.log('Camera stream ready');
-            setCameraReady(true);
-          };
         }
+
+        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
+          matchCount++;
+        }
+        totalBlocks++;
+      }
+    }
+
+    return (matchCount / totalBlocks) * 100;
+  }, [rgbToHsv]);
+
+  const updateViewCount = useCallback(async () => {
+    if (docId) {
+      try {
+        const docRef = doc(db, "arContent", docId);
+        await updateDoc(docRef, {
+          views: increment(1)
+        });
       } catch (err) {
-        console.error('Camera access error:', err);
-        setError('Failed to access camera: ' + err.message);
+        console.error("Error updating view count:", err);
       }
-    };
+    }
+  }, [docId]);
 
-    initCamera();
-
-    return () => {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
-    };
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const key = params.get('key');
+    if (key) {
+      fetchReferenceImage(key);
+    }
   }, []);
 
-  // Image matching function
-  const matchImages = useCallback(async (capturedImage, targetImage) => {
-    if (!model) return false;
-
+  const fetchReferenceImage = async (key) => {
     try {
-      const capturedTensor = tf.browser.fromPixels(capturedImage);
-      const capturedFeatures = await model.infer(capturedTensor, true);
-
-      const targetTensor = tf.browser.fromPixels(targetImage);
-      const targetFeatures = await model.infer(targetTensor, true);
-
-      const similarity = tf.metrics.cosineProximity(
-        capturedFeatures.reshape([1, -1]),
-        targetFeatures.reshape([1, -1])
-      ).dataSync()[0];
-
-      tf.dispose([capturedTensor, targetTensor, capturedFeatures, targetFeatures]);
-
-      return similarity > 0.85;
-    } catch (err) {
-      console.error('Image matching error:', err);
-      return false;
-    }
-  }, [model]);
-
-  // Update loading state
-  useEffect(() => {
-    if (modelLoaded && cameraReady && targetImage) {
-      console.log('All components ready');
-      setLoading(false);
-    }
-  }, [modelLoaded, cameraReady, targetImage]);
-
-  // Main detection loop
-  useEffect(() => {
-    if (loading || !model || !targetImage || !videoRef.current || !canvasRef.current) {
-      console.log('Detection loop waiting for:', {
-        loading,
-        model: !!model,
-        targetImage: !!targetImage,
-        video: !!videoRef.current,
-        canvas: !!canvasRef.current
-      });
-      return;
-    }
-
-    console.log('Starting detection loop');
-    let animationFrame;
-    let isActive = true;
-    
-    const targetImg = new Image();
-    targetImg.src = targetImage;
-    targetImg.onload = () => {
-      console.log('Target image loaded');
-    };
-
-    const detect = async () => {
-      if (!isActive || !canvasRef.current || !videoRef.current) return;
-
-      const context = canvasRef.current.getContext('2d');
-      if (!context) return;
-
-      // Update canvas dimensions if needed
-      if (canvasRef.current.width !== videoRef.current.videoWidth ||
-          canvasRef.current.height !== videoRef.current.videoHeight) {
-        canvasRef.current.width = videoRef.current.videoWidth;
-        canvasRef.current.height = videoRef.current.videoHeight;
-      }
-
-      context.drawImage(videoRef.current, 0, 0);
-
-      const isMatch = await matchImages(canvasRef.current, targetImg);
+      const q = query(collection(db, "arContent"), where("contentKey", "==", key));
+      const querySnapshot = await getDocs(q);
       
-      if (isMatch && !isMatching) {
-        console.log('Match found!');
-        setIsMatching(true);
-        if (overlayVideoRef.current) {
-          overlayVideoRef.current.play().catch(console.error);
+      if (!querySnapshot.empty) {
+        const doc = querySnapshot.docs[0];
+        const data = doc.data();
+        setDocId(doc.id);
+        setVideoUrl(data.videoUrl);
+        
+        if (data.imageUrl) {
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => setReferenceImage(img);
+          img.src = data.imageUrl;
         }
-      } else if (!isMatch && isMatching) {
-        console.log('Match lost');
-        setIsMatching(false);
-        if (overlayVideoRef.current) {
-          overlayVideoRef.current.pause();
-          overlayVideoRef.current.currentTime = 0;
+      }
+    } catch (err) {
+      setError('Error loading reference image');
+      console.error(err);
+    }
+  };
+
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        } 
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        setIsStreaming(true);
+        setError(null);
+      }
+    } catch (err) {
+      setError('Unable to access camera. Please check permissions.');
+      console.error(err);
+    }
+  };
+
+  const stopCamera = useCallback(() => {
+    if (videoRef.current?.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+      setIsStreaming(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let intervalId;
+    if (isStreaming && referenceImage) {
+      intervalId = setInterval(() => {
+        if (!videoRef.current || !canvasRef.current) return;
+
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+        const context = canvas.getContext('2d');
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(referenceImage, 0, 0, canvas.width, canvas.height);
+        const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
+
+        const score = compareImages(capturedFrame, referenceData);
+        setMatchScore(score);
+        
+        if (score > 70 && !showVideo) {
+          setShowVideo(true);
+          updateViewCount();
         }
-      }
+      }, 500);
+    }
+    return () => clearInterval(intervalId);
+  }, [isStreaming, referenceImage, compareImages, showVideo, updateViewCount]);
 
-      if (isActive) {
-        animationFrame = requestAnimationFrame(detect);
-      }
-    };
+  useEffect(() => {
+    return () => stopCamera();
+  }, [stopCamera]);
 
-    detect();
-
-    return () => {
-      isActive = false;
-      if (animationFrame) {
-        cancelAnimationFrame(animationFrame);
-      }
-    };
-  }, [loading, model, targetImage, isMatching, matchImages]);
-
-  if (loading) {
-    return (
-      <div className="fixed inset-0 flex flex-col items-center justify-center bg-gray-900">
-        <div className="text-white text-xl mb-4">Loading AR Viewer...</div>
-        <div className="text-gray-400 text-sm">
-          {!modelLoaded && <div>Loading AI Model...</div>}
-          {!cameraReady && <div>Initializing Camera...</div>}
-          {!targetImage && <div>Loading Target Image...</div>}
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="fixed inset-0 flex items-center justify-center bg-gray-900">
-        <div className="text-red-500 text-xl p-4 text-center">
-          {error}
-          <button 
-            onClick={() => window.location.reload()}
-            className="mt-4 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
-          >
-            Retry
-          </button>
-        </div>
-      </div>
-    );
-  }
+  // Rest of the return JSX remains the same...
 
   return (
-    <div className="relative h-screen w-screen">
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
-        className="absolute inset-0 w-full h-full object-cover"
-      />
-
-      <canvas
-        ref={canvasRef}
-        className="hidden"
-      />
-
-      {isMatching && arVideo && (
-        <video
-          ref={overlayVideoRef}
-          src={arVideo}
-          className="absolute inset-0 w-full h-full object-cover"
-          playsInline
-          loop
-          muted
-        />
-      )}
-
-      <div className="absolute top-4 left-4 right-4 flex justify-between items-center">
-        <div className="bg-black bg-opacity-50 text-white px-4 py-2 rounded">
-          {isMatching ? 'Match Found!' : 'Scanning...'}
+    <div className="max-w-4xl mx-auto p-4">
+      <div className="bg-white rounded-lg shadow-lg p-6">
+        <h1 className="text-2xl font-bold mb-4">AR Image Matcher</h1>
+        
+        {error && (
+          <div className="bg-red-50 text-red-700 p-4 rounded-lg mb-4">
+            {error}
+          </div>
+        )}
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden relative">
+            {referenceImage && (
+              <img
+                src={referenceImage.src}
+                alt="Reference"
+                className="w-full h-full object-cover"
+                crossOrigin="anonymous"
+              />
+            )}
+            <p className="text-center mt-2">Reference Image</p>
+          </div>
+          
+          <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden relative">
+            {showVideo && videoUrl ? (
+              <video
+                src={videoUrl}
+                className="w-full h-full object-cover"
+                autoPlay
+                loop
+                controls
+                playsInline
+              />
+            ) : (
+              <>
+                <video
+                  ref={videoRef}
+                  className="w-full h-full object-cover"
+                  autoPlay
+                  playsInline
+                />
+                <canvas
+                  ref={canvasRef}
+                  className="hidden"
+                />
+              </>
+            )}
+            <p className="text-center mt-2">
+              {showVideo ? "AR Content" : "Camera Feed"}
+            </p>
+          </div>
         </div>
+
+        <button
+          onClick={isStreaming ? stopCamera : startCamera}
+          className={`w-full py-2 px-4 rounded-lg text-white font-semibold mb-4 ${
+            isStreaming ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
+          }`}
+          disabled={showVideo}
+        >
+          {isStreaming ? "Stop Camera" : "Start Camera"}
+        </button>
+
+        {matchScore !== null && !showVideo && (
+          <div className="bg-gray-50 p-4 rounded-lg">
+            <h3 className="text-lg font-semibold mb-2">
+              Match Score: {matchScore.toFixed(1)}%
+            </h3>
+            <p className="text-gray-600">
+              {matchScore > 70 ? "It's a match!" : 
+               matchScore > 40 ? "Partial match" : "No match found"}
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
 };
 
-export default ARViewer;
+export default ImageMatcher;
