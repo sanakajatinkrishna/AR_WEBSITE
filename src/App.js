@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getFirestore, collection, query, where, onSnapshot } from 'firebase/firestore';
-import { getStorage, ref, getDownloadURL } from 'firebase/storage';
 
 // Firebase configuration
 const firebaseConfig = {
@@ -22,7 +21,6 @@ if (!getApps().length) {
   app = getApp();
 }
 const db = getFirestore(app);
-const storage = getStorage(app);
 
 const ImageMatcher = () => {
   const videoRef = useRef(null);
@@ -31,50 +29,6 @@ const ImageMatcher = () => {
   const [matchScore, setMatchScore] = useState(0);
   const [selectedMarker, setSelectedMarker] = useState(null);
   const [error, setError] = useState(null);
-  const [referenceImage, setReferenceImage] = useState(null);
-  const [isLoadingImage, setIsLoadingImage] = useState(false);
-
-  // Load reference image with retry mechanism
-const loadReferenceImage = useCallback(async (imageUrl) => {
-    setIsLoadingImage(true);
-    setError(null);
-    
-    try {
-      console.log('Loading reference image from:', imageUrl);
-      
-      // If it's a Firebase Storage URL, get the download URL
-      if (imageUrl.includes('firebasestorage.googleapis.com')) {
-        const storageRef = ref(storage, imageUrl);
-        imageUrl = await getDownloadURL(storageRef);
-        console.log('Got download URL:', imageUrl);
-      }
-
-      // Create a new image object
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      
-      // Create a promise to handle image loading
-      await new Promise((resolve, reject) => {
-        img.onload = () => {
-          console.log('Image loaded successfully');
-          setReferenceImage(img);
-          resolve();
-        };
-        
-        img.onerror = (e) => {
-          console.error('Error loading image:', e);
-          reject(new Error('Failed to load reference image'));
-        };
-        
-        img.src = imageUrl;
-      });
-    } catch (err) {
-      console.error('Error in loadReferenceImage:', err);
-      setError(`Failed to load reference image: ${err.message}`);
-    } finally {
-      setIsLoadingImage(false);
-    }
-  }, []); 
 
   // Compare images using HSV color space
   const compareImages = useCallback((capturedFrame, referenceCanvas) => {
@@ -120,14 +74,7 @@ const loadReferenceImage = useCallback(async (imageUrl) => {
 
   // Capture and compare frame
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !referenceImage) {
-      console.log('Missing required refs:', {
-        video: !!videoRef.current,
-        canvas: !!canvasRef.current,
-        reference: !!referenceImage
-      });
-      return;
-    }
+    if (!videoRef.current || !canvasRef.current || !selectedMarker) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -146,19 +93,23 @@ const loadReferenceImage = useCallback(async (imageUrl) => {
     referenceCanvas.width = canvas.width;
     referenceCanvas.height = canvas.height;
     const refContext = referenceCanvas.getContext('2d');
-    refContext.drawImage(referenceImage, 0, 0, canvas.width, canvas.height);
 
-    // Compare and update score
-    const score = compareImages(capturedFrame, referenceCanvas);
-    setMatchScore(score);
-  }, [compareImages, referenceImage]);
+    // Create and load reference image
+    const refImg = new Image();
+    refImg.crossOrigin = "anonymous";
+    
+    refImg.onload = () => {
+      refContext.drawImage(refImg, 0, 0, canvas.width, canvas.height);
+      const score = compareImages(capturedFrame, referenceCanvas);
+      setMatchScore(score);
+    };
+
+    refImg.src = selectedMarker.imageUrl;
+  }, [compareImages, selectedMarker]);
 
   // Start camera
   const startCamera = useCallback(async () => {
-    if (!selectedMarker) {
-      console.log('No marker selected');
-      return;
-    }
+    if (!selectedMarker) return;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -172,7 +123,6 @@ const loadReferenceImage = useCallback(async (imageUrl) => {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.onloadedmetadata = () => {
-          console.log('Camera stream started');
           setIsStreaming(true);
           setError(null);
         };
@@ -201,10 +151,7 @@ const loadReferenceImage = useCallback(async (imageUrl) => {
   // Firebase listener
   useEffect(() => {
     const key = getContentKey();
-    if (!key) {
-      console.log('No content key found in URL');
-      return;
-    }
+    if (!key) return;
     
     console.log('Fetching content for key:', key);
     
@@ -223,23 +170,19 @@ const loadReferenceImage = useCallback(async (imageUrl) => {
         };
         console.log('Marker data received:', markerData);
         setSelectedMarker(markerData);
-        
-        // Load reference image when marker data is received
-        if (markerData.imageUrl) {
-          loadReferenceImage(markerData.imageUrl);
-        }
       } else {
         console.log('No active content found for key:', key);
+        setError('No active content found');
       }
     });
 
     return () => unsubscribe();
-  }, [getContentKey, loadReferenceImage]);
+  }, [getContentKey]);
 
   // Continuous capture interval
   useEffect(() => {
     let intervalId;
-    if (isStreaming && referenceImage) {
+    if (isStreaming && selectedMarker) {
       intervalId = setInterval(captureFrame, 200);
     }
     return () => {
@@ -247,12 +190,23 @@ const loadReferenceImage = useCallback(async (imageUrl) => {
         clearInterval(intervalId);
       }
     };
-  }, [isStreaming, captureFrame, referenceImage]);
+  }, [isStreaming, captureFrame, selectedMarker]);
 
   // Cleanup
   useEffect(() => {
     return () => stopCamera();
   }, [stopCamera]);
+
+  // Debug log for marker data
+  useEffect(() => {
+    if (selectedMarker) {
+      console.log('Selected marker updated:', {
+        id: selectedMarker.id,
+        imageUrl: selectedMarker.imageUrl,
+        isActive: selectedMarker.isActive
+      });
+    }
+  }, [selectedMarker]);
 
   return (
     <div style={{ maxWidth: '800px', margin: '0 auto', padding: '20px' }}>
@@ -272,18 +226,6 @@ const loadReferenceImage = useCallback(async (imageUrl) => {
         </div>
       )}
 
-      {isLoadingImage && (
-        <div style={{ 
-          padding: '10px', 
-          backgroundColor: '#e5e7eb', 
-          borderRadius: '4px',
-          marginBottom: '20px',
-          textAlign: 'center'
-        }}>
-          Loading reference image...
-        </div>
-      )}
-
       <div style={{
         display: 'grid',
         gridTemplateColumns: '1fr 1fr',
@@ -297,9 +239,9 @@ const loadReferenceImage = useCallback(async (imageUrl) => {
           aspectRatio: '16/9',
           position: 'relative'
         }}>
-          {referenceImage && (
+          {selectedMarker?.imageUrl ? (
             <img 
-              src={referenceImage.src}
+              src={selectedMarker.imageUrl}
               alt="Reference"
               style={{ 
                 width: '100%', 
@@ -310,7 +252,21 @@ const loadReferenceImage = useCallback(async (imageUrl) => {
                 left: '0'
               }}
               crossOrigin="anonymous"
+              onError={(e) => {
+                console.error('Error loading image:', e);
+                setError('Failed to load reference image');
+              }}
             />
+          ) : (
+            <div style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              color: '#6b7280'
+            }}>
+              No reference image
+            </div>
           )}
           <p style={{ 
             textAlign: 'center', 
@@ -320,7 +276,7 @@ const loadReferenceImage = useCallback(async (imageUrl) => {
             width: '100%',
             background: 'rgba(255,255,255,0.8)'
           }}>
-            Reference Image {!referenceImage && '(Loading...)'}
+            Reference Image
           </p>
         </div>
         <div style={{
@@ -356,15 +312,15 @@ const loadReferenceImage = useCallback(async (imageUrl) => {
       <div style={{ marginBottom: '20px', textAlign: 'center' }}>
         <button
           onClick={isStreaming ? stopCamera : startCamera}
-          disabled={!selectedMarker || isLoadingImage}
+          disabled={!selectedMarker}
           style={{
             padding: '8px 16px',
             backgroundColor: isStreaming ? '#dc2626' : '#3b82f6',
             color: 'white',
             border: 'none',
             borderRadius: '4px',
-            cursor: (selectedMarker && !isLoadingImage) ? 'pointer' : 'not-allowed',
-            opacity: (selectedMarker && !isLoadingImage) ? 1 : 0.5
+            cursor: selectedMarker ? 'pointer' : 'not-allowed',
+            opacity: selectedMarker ? 1 : 0.5
           }}
         >
           {isStreaming ? "Stop Camera" : "Start Camera"}
