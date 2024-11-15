@@ -2,7 +2,6 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getFirestore, collection, query, where, onSnapshot } from 'firebase/firestore';
 
-// Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
   authDomain: "app-1238f.firebaseapp.com",
@@ -25,13 +24,46 @@ const db = getFirestore(app);
 const ImageMatcher = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const referenceCanvasRef = useRef(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(0);
   const [selectedMarker, setSelectedMarker] = useState(null);
   const [error, setError] = useState(null);
+  const [isReferenceImageLoaded, setIsReferenceImageLoaded] = useState(false);
 
-  // Compare images using HSV color space
-  const compareImages = useCallback((capturedFrame, referenceCanvas) => {
+  // Load reference image
+  const loadReferenceImage = useCallback(async (imageUrl) => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      
+      img.onload = () => {
+        if (referenceCanvasRef.current) {
+          const refCanvas = referenceCanvasRef.current;
+          refCanvas.width = img.width;
+          refCanvas.height = img.height;
+          const refContext = refCanvas.getContext('2d');
+          refContext.drawImage(img, 0, 0);
+          setIsReferenceImageLoaded(true);
+          setError(null);
+          resolve(true);
+        }
+      };
+
+      img.onerror = () => {
+        setError('Failed to load reference image. Please check the URL and CORS settings.');
+        setIsReferenceImageLoaded(false);
+        reject(new Error('Failed to load reference image'));
+      };
+
+      img.src = imageUrl;
+    });
+  }, []);
+
+  // Compare images
+  const compareImages = useCallback((capturedFrame) => {
+    if (!referenceCanvasRef.current || !isReferenceImageLoaded) return 0;
+
     const width = capturedFrame.width;
     const height = capturedFrame.height;
     const blockSize = 8;
@@ -40,8 +72,7 @@ const ImageMatcher = () => {
     let matchCount = 0;
     let totalBlocks = 0;
 
-    // Get reference frame data
-    const refContext = referenceCanvas.getContext('2d');
+    const refContext = referenceCanvasRef.current.getContext('2d');
     const referenceFrame = refContext.getImageData(0, 0, width, height);
 
     for (let y = 0; y < height; y += blockSize) {
@@ -70,42 +101,24 @@ const ImageMatcher = () => {
     }
 
     return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
-  }, []);
+  }, [isReferenceImageLoaded]);
 
-  // Capture and compare frame
+  // Capture frame
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !selectedMarker) return;
+    if (!videoRef.current || !canvasRef.current || !isReferenceImageLoaded) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
-    // Set canvas dimensions to match video
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-
-    // Draw current video frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
-
-    // Create reference canvas with same dimensions
-    const referenceCanvas = document.createElement('canvas');
-    referenceCanvas.width = canvas.width;
-    referenceCanvas.height = canvas.height;
-    const refContext = referenceCanvas.getContext('2d');
-
-    // Create and load reference image
-    const refImg = new Image();
-    refImg.crossOrigin = "anonymous";
     
-    refImg.onload = () => {
-      refContext.drawImage(refImg, 0, 0, canvas.width, canvas.height);
-      const score = compareImages(capturedFrame, referenceCanvas);
-      setMatchScore(score);
-    };
-
-    refImg.src = selectedMarker.imageUrl;
-  }, [compareImages, selectedMarker]);
+    const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+    const score = compareImages(capturedFrame);
+    setMatchScore(score);
+  }, [compareImages, isReferenceImageLoaded]);
 
   // Start camera
   const startCamera = useCallback(async () => {
@@ -123,6 +136,7 @@ const ImageMatcher = () => {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.onloadedmetadata = () => {
+          videoRef.current.play();
           setIsStreaming(true);
           setError(null);
         };
@@ -130,16 +144,19 @@ const ImageMatcher = () => {
     } catch (err) {
       console.error('Camera error:', err);
       setError('Unable to access camera. Please ensure camera permissions are granted.');
+      setIsStreaming(false);
     }
   }, [selectedMarker]);
 
   // Stop camera
   const stopCamera = useCallback(() => {
     if (videoRef.current?.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      const tracks = videoRef.current.srcObject.getTracks();
+      tracks.forEach(track => track.stop());
       videoRef.current.srcObject = null;
-      setIsStreaming(false);
     }
+    setIsStreaming(false);
+    setMatchScore(0);
   }, []);
 
   // Get content key from URL
@@ -151,9 +168,10 @@ const ImageMatcher = () => {
   // Firebase listener
   useEffect(() => {
     const key = getContentKey();
-    if (!key) return;
-    
-    console.log('Fetching content for key:', key);
+    if (!key) {
+      setError('No content key provided');
+      return;
+    }
     
     const arContentRef = collection(db, 'arContent');
     const markerQuery = query(
@@ -162,27 +180,46 @@ const ImageMatcher = () => {
       where('isActive', '==', true)
     );
 
-    const unsubscribe = onSnapshot(markerQuery, (snapshot) => {
-      if (!snapshot.empty) {
-        const markerData = {
-          id: snapshot.docs[0].id,
-          ...snapshot.docs[0].data()
-        };
-        console.log('Marker data received:', markerData);
-        setSelectedMarker(markerData);
-      } else {
-        console.log('No active content found for key:', key);
-        setError('No active content found');
+    const unsubscribe = onSnapshot(markerQuery, 
+      (snapshot) => {
+        if (!snapshot.empty) {
+          const markerData = {
+            id: snapshot.docs[0].id,
+            ...snapshot.docs[0].data()
+          };
+          setSelectedMarker(markerData);
+          setError(null);
+        } else {
+          setError('No active content found');
+          setSelectedMarker(null);
+        }
+      },
+      (err) => {
+        console.error('Firebase query error:', err);
+        setError('Failed to fetch content data');
+        setSelectedMarker(null);
       }
-    });
+    );
 
     return () => unsubscribe();
   }, [getContentKey]);
 
-  // Continuous capture interval
+  // Load reference image when marker changes
+  useEffect(() => {
+    if (selectedMarker?.imageUrl) {
+      loadReferenceImage(selectedMarker.imageUrl).catch(() => {
+        stopCamera();
+      });
+    } else {
+      setIsReferenceImageLoaded(false);
+      stopCamera();
+    }
+  }, [selectedMarker, loadReferenceImage, stopCamera]);
+
+  // Capture interval
   useEffect(() => {
     let intervalId;
-    if (isStreaming && selectedMarker) {
+    if (isStreaming && isReferenceImageLoaded) {
       intervalId = setInterval(captureFrame, 200);
     }
     return () => {
@@ -190,164 +227,89 @@ const ImageMatcher = () => {
         clearInterval(intervalId);
       }
     };
-  }, [isStreaming, captureFrame, selectedMarker]);
+  }, [isStreaming, captureFrame, isReferenceImageLoaded]);
 
-  // Cleanup
+  // Cleanup on unmount
   useEffect(() => {
     return () => stopCamera();
   }, [stopCamera]);
 
-  // Debug log for marker data
-  useEffect(() => {
-    if (selectedMarker) {
-      console.log('Selected marker updated:', {
-        id: selectedMarker.id,
-        imageUrl: selectedMarker.imageUrl,
-        isActive: selectedMarker.isActive
-      });
-    }
-  }, [selectedMarker]);
-
   return (
-    <div style={{ maxWidth: '800px', margin: '0 auto', padding: '20px' }}>
-      <h1 style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '20px', textAlign: 'center' }}>
+    <div className="max-w-4xl mx-auto p-5">
+      <h1 className="text-2xl font-bold mb-5 text-center">
         AR Image Matcher
       </h1>
 
       {error && (
-        <div style={{ 
-          padding: '10px', 
-          backgroundColor: '#fee2e2', 
-          color: '#dc2626', 
-          borderRadius: '4px',
-          marginBottom: '20px' 
-        }}>
+        <div className="p-3 mb-5 bg-red-100 text-red-600 rounded-md">
           {error}
         </div>
       )}
 
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: '1fr 1fr',
-        gap: '20px',
-        marginBottom: '20px'
-      }}>
-        <div style={{
-          backgroundColor: '#f3f4f6',
-          borderRadius: '8px',
-          overflow: 'hidden',
-          aspectRatio: '16/9',
-          position: 'relative'
-        }}>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
+        <div className="bg-gray-100 rounded-lg overflow-hidden aspect-video relative">
           {selectedMarker?.imageUrl ? (
             <img 
               src={selectedMarker.imageUrl}
               alt="Reference"
-              style={{ 
-                width: '100%', 
-                height: '100%', 
-                objectFit: 'contain',
-                position: 'absolute',
-                top: '0',
-                left: '0'
-              }}
+              className="w-full h-full object-contain absolute inset-0"
               crossOrigin="anonymous"
-              onError={(e) => {
-                console.error('Error loading image:', e);
-                setError('Failed to load reference image');
-              }}
             />
           ) : (
-            <div style={{
-              position: 'absolute',
-              top: '50%',
-              left: '50%',
-              transform: 'translate(-50%, -50%)',
-              color: '#6b7280'
-            }}>
+            <div className="absolute inset-0 flex items-center justify-center text-gray-500">
               No reference image
             </div>
           )}
-          <p style={{ 
-            textAlign: 'center', 
-            marginTop: '8px', 
-            position: 'absolute',
-            bottom: '0',
-            width: '100%',
-            background: 'rgba(255,255,255,0.8)'
-          }}>
+          <p className="absolute bottom-0 w-full text-center bg-white/80 py-1">
             Reference Image
           </p>
         </div>
-        <div style={{
-          backgroundColor: '#f3f4f6',
-          borderRadius: '8px',
-          overflow: 'hidden',
-          aspectRatio: '16/9',
-          position: 'relative'
-        }}>
+
+        <div className="bg-gray-100 rounded-lg overflow-hidden aspect-video relative">
           <video
             ref={videoRef}
-            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+            className="w-full h-full object-cover"
             autoPlay
             playsInline
           />
           <canvas
             ref={canvasRef}
-            style={{ display: 'none' }}
+            className="hidden"
           />
-          <p style={{ 
-            textAlign: 'center', 
-            marginTop: '8px',
-            position: 'absolute',
-            bottom: '0',
-            width: '100%',
-            background: 'rgba(255,255,255,0.8)'
-          }}>
+          <canvas
+            ref={referenceCanvasRef}
+            className="hidden"
+          />
+          <p className="absolute bottom-0 w-full text-center bg-white/80 py-1">
             Camera Feed
           </p>
         </div>
       </div>
 
-      <div style={{ marginBottom: '20px', textAlign: 'center' }}>
+      <div className="text-center mb-5">
         <button
           onClick={isStreaming ? stopCamera : startCamera}
-          disabled={!selectedMarker}
-          style={{
-            padding: '8px 16px',
-            backgroundColor: isStreaming ? '#dc2626' : '#3b82f6',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: selectedMarker ? 'pointer' : 'not-allowed',
-            opacity: selectedMarker ? 1 : 0.5
-          }}
+          disabled={!selectedMarker || !isReferenceImageLoaded}
+          className={`px-4 py-2 rounded-md text-white ${
+            isStreaming 
+              ? 'bg-red-600 hover:bg-red-700' 
+              : 'bg-blue-600 hover:bg-blue-700'
+          } ${(!selectedMarker || !isReferenceImageLoaded) ? 'opacity-50 cursor-not-allowed' : ''}`}
         >
           {isStreaming ? "Stop Camera" : "Start Camera"}
         </button>
       </div>
 
-      <div style={{
-        padding: '16px',
-        backgroundColor: '#f3f4f6',
-        borderRadius: '8px',
-        textAlign: 'center',
-        position: 'fixed',
-        bottom: '20px',
-        left: '50%',
-        transform: 'translateX(-50%)',
-        width: '90%',
-        maxWidth: '400px',
-        boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-        zIndex: 1000
-      }}>
-        <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '8px' }}>
-          Match Score: {matchScore.toFixed(1)}%
-        </h3>
-        <p style={{ color: '#4b5563' }}>
-          {matchScore > 70 ? "It's a match!" : 
-           matchScore > 40 ? "Partial match" : "No match found"}
-        </p>
+      <div className="fixed bottom-5 left-1/2 -translate-x-1/2 w-[90%] max-w-md">
+        <div className="bg-gray-100 rounded-lg p-4 text-center shadow-md">
+          <h3 className="text-lg font-bold mb-2">
+            Match Score: {matchScore.toFixed(1)}%
+          </h3>
+          <p className="text-gray-600">
+            {matchScore > 70 ? "It's a match!" : 
+             matchScore > 40 ? "Partial match" : "No match found"}
+          </p>
+        </div>
       </div>
     </div>
   );
