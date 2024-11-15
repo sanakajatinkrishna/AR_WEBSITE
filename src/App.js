@@ -43,7 +43,7 @@ const App = () => {
     let s = max === 0 ? 0 : diff / max;
     let v = max;
 
-  if (diff !== 0) {
+    if (diff !== 0) {
       switch (max) {
         case r: h = 60 * ((g - b) / diff + (g < b ? 6 : 0)); break;
         case g: h = 60 * ((b - r) / diff + 2); break;
@@ -56,6 +56,8 @@ const App = () => {
   };
 
   const compareImages = useCallback((imgData1, imgData2) => {
+    if (!imgData1 || !imgData2) return 0;
+    
     const width = Math.min(imgData1.width, imgData2.width);
     const height = Math.min(imgData1.height, imgData2.height);
     const blockSize = 8;
@@ -78,6 +80,8 @@ const App = () => {
           for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
             const i = ((y + by) * width + (x + bx)) * 4;
             
+            if (i + 2 >= imgData1.data.length || i + 2 >= imgData2.data.length) continue;
+
             const r1 = imgData1.data[i];
             const g1 = imgData1.data[i + 1];
             const b1 = imgData1.data[i + 2];
@@ -114,7 +118,7 @@ const App = () => {
       }
     }
 
-    return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
+    return totalBlocks > 0 ? Math.min(100, (matchCount / totalBlocks) * 100 * 1.5) : 0;
   }, []);
 
   const loadReferenceImage = useCallback(async (url) => {
@@ -164,19 +168,32 @@ const App = () => {
   }, [videoUrl, isVideoPlaying]);
 
   const detectCanvas = useCallback((imageData) => {
-    if (!referenceImageRef.current) return { detected: false };
+    if (!referenceImageRef.current || !imageData) return { detected: false };
 
-    // Scale captured frame to match reference image size
+    // Create scaled version of captured frame
     const tempCanvas = document.createElement('canvas');
     const tempCtx = tempCanvas.getContext('2d');
-    tempCanvas.width = referenceImageRef.current.width;
-    tempCanvas.height = referenceImageRef.current.height;
+    tempCanvas.width = 320;
+    tempCanvas.height = 240;
     
-    const tempImageData = tempCtx.createImageData(tempCanvas.width, tempCanvas.height);
-    tempImageData.data.set(new Uint8ClampedArray(imageData.data));
+    const frameCanvas = document.createElement('canvas');
+    frameCanvas.width = imageData.width;
+    frameCanvas.height = imageData.height;
+    const frameCtx = frameCanvas.getContext('2d');
     
-    const score = compareImages(tempImageData, referenceImageRef.current);
+    const tempImageData = new ImageData(
+      new Uint8ClampedArray(imageData.data),
+      imageData.width,
+      imageData.height
+    );
+    frameCtx.putImageData(tempImageData, 0, 0);
+    
+    tempCtx.drawImage(frameCanvas, 0, 0, 320, 240);
+    const scaledImageData = tempCtx.getImageData(0, 0, 320, 240);
+    
+    const score = compareImages(scaledImageData, referenceImageRef.current);
     setMatchScore(score);
+    console.log('Match score:', score);
 
     if (score > 70) {
       let left = imageData.width, right = 0, top = imageData.height, bottom = 0;
@@ -186,6 +203,8 @@ const App = () => {
       for (let y = 0; y < height; y += 2) {
         for (let x = 0; x < width; x += 2) {
           const i = (y * width + x) * 4;
+          if (i + 2 >= imageData.data.length) continue;
+          
           const brightness = (imageData.data[i] + imageData.data[i + 1] + imageData.data[i + 2]) / 3;
 
           if (brightness > 30) {
@@ -197,22 +216,24 @@ const App = () => {
         }
       }
 
-      const centerX = (left + right) / 2;
-      const centerY = (top + bottom) / 2;
-      const objWidth = right - left;
-      const objHeight = bottom - top;
+      if (right > left && bottom > top) {
+        const centerX = (left + right) / 2;
+        const centerY = (top + bottom) / 2;
+        const objWidth = right - left;
+        const objHeight = bottom - top;
 
-      const posX = (centerX / width) * 100;
-      const posY = (centerY / height) * 100;
+        const posX = (centerX / width) * 100;
+        const posY = (centerY / height) * 100;
 
-      trackedPositionRef.current.x = trackedPositionRef.current.x * 0.8 + posX * 0.2;
-      trackedPositionRef.current.y = trackedPositionRef.current.y * 0.8 + posY * 0.2;
+        trackedPositionRef.current.x = trackedPositionRef.current.x * 0.8 + posX * 0.2;
+        trackedPositionRef.current.y = trackedPositionRef.current.y * 0.8 + posY * 0.2;
 
-      return {
-        position: { x: trackedPositionRef.current.x, y: trackedPositionRef.current.y },
-        size: { width: objWidth, height: objHeight },
-        detected: true
-      };
+        return {
+          position: { x: trackedPositionRef.current.x, y: trackedPositionRef.current.y },
+          size: { width: objWidth, height: objHeight },
+          detected: true
+        };
+      }
     }
 
     return { detected: false };
@@ -222,7 +243,7 @@ const App = () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
 
-    if (!video || !canvas) {
+    if (!video || !canvas || !video.videoWidth) {
       animationFrameRef.current = requestAnimationFrame(processFrame);
       return;
     }
@@ -239,8 +260,8 @@ const App = () => {
     
     context.drawImage(video, 0, 0);
     
-    const centerWidth = canvas.width * 0.5;
-    const centerHeight = canvas.height * 0.5;
+    const centerWidth = Math.min(canvas.width, 640);
+    const centerHeight = Math.min(canvas.height, 480);
     const x = (canvas.width - centerWidth) / 2;
     const y = (canvas.height - centerHeight) / 2;
     
@@ -270,7 +291,6 @@ const App = () => {
       }
 
       try {
-        console.log('Loading content for key:', contentKey);
         setDebugInfo('Verifying content...');
 
         const arContentRef = collection(db, 'arContent');
@@ -283,14 +303,12 @@ const App = () => {
         const snapshot = await getDocs(q);
         
         if (snapshot.empty) {
-          console.log('No content found');
           setDebugInfo('Invalid or inactive content');
           return;
         }
 
         const doc = snapshot.docs[0];
         const data = doc.data();
-        console.log('Content found:', data);
 
         setVideoUrl(data.videoUrl);
         setImageUrl(data.imageUrl);
@@ -336,7 +354,6 @@ const App = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-          console.log('Camera started');
           
           if (isComponentMounted) {
             setDebugInfo('Camera ready - Show image');
@@ -351,8 +368,7 @@ const App = () => {
       }
     };
 
-    if (videoUrl) {
-      console.log('Starting camera');
+    if (videoUrl && !currentStream) {
       startCamera();
     }
 
@@ -457,6 +473,7 @@ const App = () => {
         <div>Status: {debugInfo}</div>
         <div>Key: {contentKey || 'Not found'}</div>
         <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
+        <div>Match Score: {matchScore.toFixed(1)}%</div>
         <div>Canvas Detected: {isCanvasDetected ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
       </div>
