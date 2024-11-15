@@ -28,6 +28,7 @@ const ImageMatcher = () => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(0);
   const [selectedMarker, setSelectedMarker] = useState(null);
+  const [referenceImageData, setReferenceImageData] = useState(null);
 
   // Get content key from URL
   const getContentKey = useCallback(() => {
@@ -35,103 +36,137 @@ const ImageMatcher = () => {
     return urlParams.get('key');
   }, []);
 
-  // Compare images
-  const compareImages = useCallback((capturedImageData, referenceImageData) => {
+  // Compare images with improved matching algorithm
+  const compareImages = useCallback((capturedImageData, refImageData) => {
+    if (!capturedImageData || !refImageData) return 0;
+
     const width = capturedImageData.width;
     const height = capturedImageData.height;
-    const blockSize = 8;
+    const blockSize = 16; // Increased block size for better performance
     let matchCount = 0;
     let totalBlocks = 0;
 
+    // Calculate average color for a block
+    const getBlockAverage = (imageData, startX, startY, blockSize) => {
+      let rSum = 0, gSum = 0, bSum = 0;
+      let pixelCount = 0;
+
+      for (let y = startY; y < Math.min(startY + blockSize, height); y++) {
+        for (let x = startX; x < Math.min(startX + blockSize, width); x++) {
+          const i = (y * width + x) * 4;
+          rSum += imageData.data[i];
+          gSum += imageData.data[i + 1];
+          bSum += imageData.data[i + 2];
+          pixelCount++;
+        }
+      }
+
+      return {
+        r: rSum / pixelCount,
+        g: gSum / pixelCount,
+        b: bSum / pixelCount
+      };
+    };
+
+    // Compare blocks
     for (let y = 0; y < height; y += blockSize) {
       for (let x = 0; x < width; x += blockSize) {
-        let blockMatchSum = 0;
-        let blockPixels = 0;
+        const block1 = getBlockAverage(capturedImageData, x, y, blockSize);
+        const block2 = getBlockAverage(refImageData, x, y, blockSize);
 
-        for (let by = 0; by < blockSize && y + by < height; by++) {
-          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-            const i = ((y + by) * width + (x + bx)) * 4;
-            
-            const r1 = capturedImageData.data[i];
-            const g1 = capturedImageData.data[i + 1];
-            const b1 = capturedImageData.data[i + 2];
-            
-            const r2 = referenceImageData.data[i];
-            const g2 = referenceImageData.data[i + 1];
-            const b2 = referenceImageData.data[i + 2];
+        // Calculate color difference using weighted RGB
+        const colorDiff = Math.sqrt(
+          Math.pow((block1.r - block2.r) * 0.3, 2) +
+          Math.pow((block1.g - block2.g) * 0.59, 2) +
+          Math.pow((block1.b - block2.b) * 0.11, 2)
+        );
 
-            const colorDiff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
-            const match = colorDiff < 150 ? 1 : 0;
-
-            blockMatchSum += match;
-            blockPixels++;
-          }
-        }
-
-        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
+        // Adjust threshold for better matching
+        if (colorDiff < 50) {
           matchCount++;
         }
         totalBlocks++;
       }
     }
 
-    return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
+    return Math.min(100, (matchCount / totalBlocks) * 100 * 1.2);
   }, []);
 
-  // Capture and compare frame
+  // Load and process reference image
+  const loadReferenceImage = useCallback((imageUrl) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      const tempCanvas = document.createElement('canvas');
+      const tempContext = tempCanvas.getContext('2d');
+      
+      // Set canvas size to match video dimensions
+      if (videoRef.current) {
+        tempCanvas.width = videoRef.current.videoWidth || 640;
+        tempCanvas.height = videoRef.current.videoHeight || 480;
+      } else {
+        tempCanvas.width = 640;
+        tempCanvas.height = 480;
+      }
+
+      // Draw and store reference image data
+      tempContext.drawImage(img, 0, 0, tempCanvas.width, tempCanvas.height);
+      setReferenceImageData(tempContext.getImageData(0, 0, tempCanvas.width, tempCanvas.height));
+    };
+    img.src = imageUrl;
+  }, []);
+
+  // Capture and compare frame with improved handling
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !selectedMarker) return;
+    if (!videoRef.current || !canvasRef.current || !referenceImageData) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
-    // Set canvas size to match video
+    // Ensure canvas matches video dimensions
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
-    // Draw and capture video frame
+    // Capture and process frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+    
+    // Compare with stored reference image
+    const score = compareImages(capturedFrame, referenceImageData);
+    setMatchScore(score);
+  }, [compareImages, referenceImageData]);
 
-    // Create temporary canvas for reference image
-    const tempCanvas = document.createElement('canvas');
-    const tempContext = tempCanvas.getContext('2d');
-    tempCanvas.width = canvas.width;
-    tempCanvas.height = canvas.height;
-
-    const referenceImg = new Image();
-    referenceImg.crossOrigin = "anonymous";
-    referenceImg.onload = () => {
-      tempContext.drawImage(referenceImg, 0, 0, canvas.width, canvas.height);
-      const referenceFrame = tempContext.getImageData(0, 0, canvas.width, canvas.height);
-      const score = compareImages(capturedFrame, referenceFrame);
-      setMatchScore(score);
-    };
-    referenceImg.src = selectedMarker.imageUrl;
-  }, [compareImages, selectedMarker]);
-
-  // Start camera
+  // Start camera with error handling
   const startCamera = useCallback(async () => {
     if (!selectedMarker) return;
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
+      const constraints = {
+        video: {
           facingMode: 'environment',
           width: { ideal: 1280 },
           height: { ideal: 720 }
-        } 
-      });
+        }
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        setIsStreaming(true);
+        videoRef.current.onloadedmetadata = () => {
+          setIsStreaming(true);
+          // Reload reference image with correct dimensions
+          if (selectedMarker?.imageUrl) {
+            loadReferenceImage(selectedMarker.imageUrl);
+          }
+        };
       }
     } catch (err) {
       console.error('Camera error:', err);
+      alert('Failed to access camera. Please ensure camera permissions are granted.');
     }
-  }, [selectedMarker]);
+  }, [selectedMarker, loadReferenceImage]);
 
   // Stop camera
   const stopCamera = useCallback(() => {
@@ -161,24 +196,27 @@ const ImageMatcher = () => {
           ...snapshot.docs[0].data()
         };
         setSelectedMarker(markerData);
+        if (markerData.imageUrl) {
+          loadReferenceImage(markerData.imageUrl);
+        }
       }
     });
 
     return () => unsubscribe();
-  }, [getContentKey]);
+  }, [getContentKey, loadReferenceImage]);
 
   // Continuous capture interval
   useEffect(() => {
     let intervalId;
-    if (isStreaming && selectedMarker) {
-      intervalId = setInterval(captureFrame, 100); // Increased frequency for smoother updates
+    if (isStreaming && referenceImageData) {
+      intervalId = setInterval(captureFrame, 200); // Adjusted frequency
     }
     return () => {
       if (intervalId) {
         clearInterval(intervalId);
       }
     };
-  }, [isStreaming, captureFrame, selectedMarker]);
+  }, [isStreaming, captureFrame, referenceImageData]);
 
   // Cleanup
   useEffect(() => {
