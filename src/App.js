@@ -27,10 +27,10 @@ const ImageMatcher = () => {
   const canvasRef = useRef(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(null);
-  const [error, setError] = useState(null);
   const [referenceImage, setReferenceImage] = useState(null);
   const [selectedMarker, setSelectedMarker] = useState(null);
   const [contentKey, setContentKey] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
 
   // Get content key from URL
   const getContentKey = useCallback(() => {
@@ -40,64 +40,37 @@ const ImageMatcher = () => {
 
   // Load marker image
   const loadMarkerImage = useCallback(async (imageUrl) => {
-    try {
+    if (!imageUrl) return;
+
+    return new Promise((resolve, reject) => {
       const img = new Image();
       img.crossOrigin = "anonymous";
       
       img.onload = () => {
         setReferenceImage(img);
-        setError(null);
+        setIsLoading(false);
+        resolve(img);
       };
       
       img.onerror = () => {
-        setError('Failed to load marker image');
+        reject(new Error('Failed to load image'));
       };
       
       img.src = imageUrl;
-    } catch (err) {
-      setError('Error loading marker image');
-    }
+    });
   }, []);
 
   // Handle marker selection
-  const handleMarkerSelect = useCallback((marker) => {
+  const handleMarkerSelect = useCallback(async (marker) => {
+    if (!marker?.imageUrl) return;
+    
     setSelectedMarker(marker);
-    loadMarkerImage(marker.imageUrl);
-  }, [loadMarkerImage]);
-
-  // Start camera stream
-  const startCamera = useCallback(async () => {
-    if (!selectedMarker) {
-      setError('Please wait for marker image to load');
-      return;
-    }
-
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        } 
-      });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        setIsStreaming(true);
-        setError(null);
-      }
-    } catch (err) {
-      setError('Unable to access camera. Please ensure you have granted camera permissions.');
+      await loadMarkerImage(marker.imageUrl);
+    } catch (error) {
+      console.error('Error loading marker image:', error);
     }
-  }, [selectedMarker]);
-
-  // Stop camera stream
-  const stopCamera = useCallback(() => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-      setIsStreaming(false);
-    }
-  }, []);
+  }, [loadMarkerImage]);
 
   // Compare images
   const compareImages = useCallback((imgData1, imgData2) => {
@@ -124,7 +97,6 @@ const ImageMatcher = () => {
             const g2 = imgData2.data[i + 1];
             const b2 = imgData2.data[i + 2];
 
-            // Simple RGB comparison
             const colorDiff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
             const match = colorDiff < 150 ? 1 : 0;
 
@@ -165,16 +137,44 @@ const ImageMatcher = () => {
     setMatchScore(score);
   }, [compareImages, referenceImage]);
 
-  // Load marker based on content key
+  // Start camera
+  const startCamera = useCallback(async () => {
+    if (!selectedMarker) return;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        } 
+      });
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        setIsStreaming(true);
+      }
+    } catch (err) {
+      console.error('Camera error:', err);
+    }
+  }, [selectedMarker]);
+
+  // Stop camera
+  const stopCamera = useCallback(() => {
+    if (videoRef.current?.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+      setIsStreaming(false);
+    }
+  }, []);
+
+  // Firebase listener
   useEffect(() => {
     const key = getContentKey();
-    if (!key) {
-      setError('No content key provided');
-      return;
-    }
+    if (!key) return;
 
     setContentKey(key);
-
+    
     const arContentRef = collection(db, 'arContent');
     const markerQuery = query(
       arContentRef,
@@ -182,45 +182,31 @@ const ImageMatcher = () => {
       where('isActive', '==', true)
     );
 
-    const unsubscribe = onSnapshot(markerQuery, (snapshot) => {
-      if (snapshot.empty) {
-        setError('No active marker found for this key');
-        return;
+    const unsubscribe = onSnapshot(markerQuery, async (snapshot) => {
+      if (!snapshot.empty) {
+        const markerData = {
+          id: snapshot.docs[0].id,
+          ...snapshot.docs[0].data()
+        };
+        await handleMarkerSelect(markerData);
       }
-
-      const markerDoc = snapshot.docs[0];
-      const markerData = {
-        id: markerDoc.id,
-        ...markerDoc.data()
-      };
-
-      handleMarkerSelect(markerData);
-    }, (err) => {
-      console.error('Error loading marker:', err);
-      setError('Error loading marker image');
     });
 
     return () => unsubscribe();
   }, [getContentKey, handleMarkerSelect]);
 
-  // Capture frame interval
+  // Capture interval
   useEffect(() => {
     let intervalId;
     if (isStreaming && referenceImage) {
       intervalId = setInterval(captureFrame, 500);
     }
-    return () => {
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
-    };
+    return () => intervalId && clearInterval(intervalId);
   }, [isStreaming, captureFrame, referenceImage]);
 
   // Cleanup
   useEffect(() => {
-    return () => {
-      stopCamera();
-    };
+    return () => stopCamera();
   }, [stopCamera]);
 
   return (
@@ -229,22 +215,16 @@ const ImageMatcher = () => {
         AR Image Matcher
       </h1>
 
-      {error && (
-        <div style={{
-          padding: '10px',
-          backgroundColor: '#fee2e2',
-          color: '#dc2626',
-          borderRadius: '4px',
-          marginBottom: '20px'
-        }}>
-          {error}
+      {isLoading && (
+        <div style={{ textAlign: 'center', marginBottom: '20px', color: '#666' }}>
+          Loading marker image...
         </div>
       )}
 
-      {contentKey && (
-        <p style={{ textAlign: 'center', marginBottom: '15px', color: '#666' }}>
-          Content Key: {contentKey}
-        </p>
+      {contentKey && !isLoading && (
+        <div style={{ textAlign: 'center', marginBottom: '20px', color: '#666' }}>
+          <p>Content Key: {contentKey}</p>
+        </div>
       )}
 
       <div style={{
@@ -288,29 +268,32 @@ const ImageMatcher = () => {
         </div>
       </div>
 
-      <div style={{ marginBottom: '20px' }}>
-        <button
-          onClick={isStreaming ? stopCamera : startCamera}
-          disabled={!selectedMarker}
-          style={{
-            padding: '8px 16px',
-            backgroundColor: isStreaming ? '#dc2626' : '#3b82f6',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: selectedMarker ? 'pointer' : 'not-allowed',
-            opacity: selectedMarker ? 1 : 0.5
-          }}
-        >
-          {isStreaming ? "Stop Camera" : "Start Camera"}
-        </button>
+      <div style={{ marginBottom: '20px', textAlign: 'center' }}>
+        {!isLoading && (
+          <button
+            onClick={isStreaming ? stopCamera : startCamera}
+            disabled={!selectedMarker}
+            style={{
+              padding: '8px 16px',
+              backgroundColor: isStreaming ? '#dc2626' : '#3b82f6',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: selectedMarker ? 'pointer' : 'not-allowed',
+              opacity: selectedMarker ? 1 : 0.5
+            }}
+          >
+            {isStreaming ? "Stop Camera" : "Start Camera"}
+          </button>
+        )}
       </div>
 
       {matchScore !== null && (
         <div style={{
           padding: '16px',
           backgroundColor: '#f3f4f6',
-          borderRadius: '8px'
+          borderRadius: '8px',
+          textAlign: 'center'
         }}>
           <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '8px' }}>
             Match Score: {matchScore.toFixed(1)}%
