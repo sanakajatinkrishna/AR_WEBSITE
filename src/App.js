@@ -20,91 +20,52 @@ const App = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
-  const processedImageRef = useRef(null);
+  const referenceImageRef = useRef(null);
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
+  const [imageUrl, setImageUrl] = useState(null);
   const [matchScore, setMatchScore] = useState(0);
-  const [imageLoaded, setImageLoaded] = useState(false);
 
-  // Store image in local storage
-  const storeImage = async (key, imageUrl) => {
-    try {
-      console.log('Fetching image to store:', imageUrl);
-      const response = await fetch(imageUrl);
-      if (!response.ok) throw new Error('Failed to fetch image');
-      
-      const blob = await response.blob();
-      
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const base64data = reader.result;
-          try {
-            localStorage.setItem(`ar_image_${key}`, base64data);
-            console.log('Image stored successfully');
-            resolve(base64data);
-          } catch (error) {
-            console.error('Storage error:', error);
-            reject(error);
-          }
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-    } catch (error) {
-      console.error('Error storing image:', error);
-      throw error;
+  // RGB to HSV conversion for better comparison
+  const rgbToHsv = (r, g, b) => {
+    r /= 255;
+    g /= 255;
+    b /= 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const diff = max - min;
+    
+    let h = 0;
+    let s = max === 0 ? 0 : diff / max;
+    let v = max;
+
+    if (diff !== 0) {
+      switch (max) {
+        case r: h = 60 * ((g - b) / diff + (g < b ? 6 : 0)); break;
+        case g: h = 60 * ((b - r) / diff + 2); break;
+        case b: h = 60 * ((r - g) / diff + 4); break;
+        default: break;
+      }
     }
+    
+    return [h, s * 100, v * 100];
   };
 
-  // Pre-process image for comparison
-  const preprocessImage = useCallback((img) => {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    canvas.width = 320;
-    canvas.height = 240;
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    return ctx.getImageData(0, 0, canvas.width, canvas.height);
-  }, []);
-
-  // Start video playback
-  const startVideo = useCallback(async () => {
-    if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
-
-    try {
-      overlayVideoRef.current.src = videoUrl;
-      overlayVideoRef.current.muted = false;
-      await overlayVideoRef.current.play();
-      setIsVideoPlaying(true);
-      setDebugInfo('Video playing with sound');
-    } catch (error) {
-      console.error('Video playback error:', error);
-      setDebugInfo('Click to play video with sound');
-      
-      const playOnClick = () => {
-        if (overlayVideoRef.current) {
-          overlayVideoRef.current.play()
-            .then(() => {
-              setIsVideoPlaying(true);
-              setDebugInfo('Video playing with sound');
-              document.removeEventListener('click', playOnClick);
-            })
-            .catch(console.error);
-        }
-      };
-      document.addEventListener('click', playOnClick);
-    }
-  }, [videoUrl, isVideoPlaying]);
-
-  // Compare images
+  // Compare images using HSV color space
   const compareImages = useCallback((imgData1, imgData2) => {
     if (!imgData1 || !imgData2) return 0;
     
-    const width = imgData1.width;
-    const height = imgData1.height;
+    const width = Math.min(imgData1.width, imgData2.width);
+    const height = Math.min(imgData1.height, imgData2.height);
     const blockSize = 8;
+    const hueWeight = 0.5;
+    const satWeight = 0.3;
+    const valWeight = 0.2;
+    const hueTolerance = 30;
+    const satTolerance = 30;
+    const valTolerance = 30;
     
     let matchCount = 0;
     let totalBlocks = 0;
@@ -126,11 +87,23 @@ const App = () => {
             const g2 = imgData2.data[i + 1];
             const b2 = imgData2.data[i + 2];
 
-            // Simple color difference
-            const diff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
-            const match = diff < 150 ? 1 : 0;
+            const hsv1 = rgbToHsv(r1, g1, b1);
+            const hsv2 = rgbToHsv(r2, g2, b2);
 
-            blockMatchSum += match;
+            const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
+            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
+            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
+
+            const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
+            const satMatch = satDiff <= satTolerance ? 1 : 0;
+            const valMatch = valDiff <= valTolerance ? 1 : 0;
+
+            const pixelMatchScore = 
+              hueMatch * hueWeight +
+              satMatch * satWeight +
+              valMatch * valWeight;
+
+            blockMatchSum += pixelMatchScore;
             blockPixels++;
           }
         }
@@ -142,63 +115,93 @@ const App = () => {
       }
     }
 
-    const score = totalBlocks > 0 ? Math.min(100, (matchCount / totalBlocks) * 100 * 1.5) : 0;
-    console.log('Match score:', score.toFixed(1) + '%');
-    return score;
+    return totalBlocks > 0 ? Math.min(100, (matchCount / totalBlocks) * 100 * 1.5) : 0;
   }, []);
+const startVideo = useCallback(async () => {
+  if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
-  // Process video frames
-  const processFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !processedImageRef.current) {
-      requestAnimationFrame(processFrame);
-      return;
-    }
-
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
-
-    if (canvas.width !== 320 || canvas.height !== 240) {
-      canvas.width = 320;
-      canvas.height = 240;
-    }
-
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const currentFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+  try {
+    overlayVideoRef.current.src = videoUrl;
+    overlayVideoRef.current.muted = false;
+    await overlayVideoRef.current.play();
+    setIsVideoPlaying(true);
+    setDebugInfo('Video playing with sound');
+  } catch (error) {
+    console.error('Video playback error:', error);
+    setDebugInfo('Click anywhere to play video with sound');
     
-    const score = compareImages(currentFrame, processedImageRef.current);
-    setMatchScore(score);
+    const playOnClick = () => {
+      if (overlayVideoRef.current) {
+        overlayVideoRef.current.play()
+          .then(() => {
+            setIsVideoPlaying(true);
+            setDebugInfo('Video playing with sound');
+            document.removeEventListener('click', playOnClick);
+          })
+          .catch(console.error);
+      }
+    };
+    document.addEventListener('click', playOnClick);
+  }
+}, [videoUrl, isVideoPlaying]);
 
-    if (score > 70 && !isVideoPlaying) {
-      startVideo();
-    }
+const processFrame = useCallback(() => {
+  const video = videoRef.current;
+  const canvas = canvasRef.current;
 
+  if (!video || !canvas || !video.videoWidth || !referenceImageRef.current) {
     requestAnimationFrame(processFrame);
-  }, [compareImages, isVideoPlaying, startVideo]);
+    return;
+  }
 
-  // Load and process reference image
-  const loadStoredImage = useCallback(async () => {
-    const storedImage = localStorage.getItem(`ar_image_${contentKey}`);
-    if (!storedImage) {
-      console.log('No stored image found');
-      return false;
-    }
+  const context = canvas.getContext('2d', { willReadFrequently: true });
 
-    return new Promise((resolve) => {
+  // Ensure canvas matches video dimensions
+  if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+  }
+  
+  // Draw current video frame
+  context.drawImage(video, 0, 0);
+  
+  // Get current frame data
+  const currentFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+  
+  // Compare with reference image
+  const score = compareImages(currentFrame, referenceImageRef.current);
+  setMatchScore(score);
+
+  // Start video playback if match score is high enough
+  if (score > 70 && !isVideoPlaying) {
+    startVideo();
+  }
+
+  requestAnimationFrame(processFrame);
+}, [compareImages, isVideoPlaying, startVideo]);
+
+
+
+  // Load reference image
+  const loadReferenceImage = useCallback(async (url) => {
+    return new Promise((resolve, reject) => {
       const img = new Image();
+      img.crossOrigin = "anonymous";
+      
       img.onload = () => {
-        processedImageRef.current = preprocessImage(img);
-        console.log('Reference image processed');
-        setImageLoaded(true);
-        resolve(true);
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 320;  // Standard size for comparison
+        canvas.height = 240;
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        referenceImageRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        resolve();
       };
-      img.onerror = (error) => {
-        console.error('Error loading stored image:', error);
-        resolve(false);
-      };
-      img.src = storedImage;
+      
+      img.onerror = reject;
+      img.src = url;
     });
-  }, [preprocessImage, contentKey]);
+  }, []);
 
   // Initialize camera
   useEffect(() => {
@@ -206,7 +209,6 @@ const App = () => {
 
     const startCamera = async () => {
       try {
-        console.log('Starting camera...');
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'environment',
@@ -218,7 +220,6 @@ const App = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-          console.log('Camera started');
           requestAnimationFrame(processFrame);
           setDebugInfo('Camera ready - Show image');
         }
@@ -228,7 +229,7 @@ const App = () => {
       }
     };
 
-    if (imageLoaded) {
+    if (videoUrl) {
       startCamera();
     }
 
@@ -237,9 +238,9 @@ const App = () => {
         stream.getTracks().forEach(track => track.stop());
       }
     };
-  }, [processFrame, imageLoaded]);
+  }, [processFrame, videoUrl]);
 
-  // Load content
+  // Load content from Firebase
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -248,16 +249,8 @@ const App = () => {
       }
 
       try {
-        setDebugInfo('Loading content...');
-        
-        // Try loading from local storage first
-        const loaded = await loadStoredImage();
-        if (loaded) {
-          setDebugInfo('Image loaded from storage');
-          return;
-        }
+        setDebugInfo('Verifying content...');
 
-        // If not in storage, fetch from Firebase
         const arContentRef = collection(db, 'arContent');
         const q = query(
           arContentRef,
@@ -266,8 +259,9 @@ const App = () => {
         );
 
         const snapshot = await getDocs(q);
+        
         if (snapshot.empty) {
-          setDebugInfo('Invalid content key');
+          setDebugInfo('Invalid or inactive content');
           return;
         }
 
@@ -275,12 +269,10 @@ const App = () => {
         const data = doc.data();
 
         setVideoUrl(data.videoUrl);
+        setImageUrl(data.imageUrl);
         
-        // Store and load image
-        await storeImage(contentKey, data.imageUrl);
-        await loadStoredImage();
-        
-        setDebugInfo('Content ready - Show image');
+        await loadReferenceImage(data.imageUrl);
+        setDebugInfo('Content loaded - Please show image');
 
       } catch (error) {
         console.error('Content loading error:', error);
@@ -289,8 +281,9 @@ const App = () => {
     };
 
     loadContent();
-  }, [contentKey, loadStoredImage]);
+  }, [contentKey, loadReferenceImage]);
 
+  // Styles
   const styles = {
     container: {
       position: 'fixed',
@@ -332,6 +325,21 @@ const App = () => {
       padding: '10px',
       borderRadius: '5px',
       zIndex: 30
+    },
+    imagePreview: {
+      position: 'absolute',
+      bottom: 20,
+      right: 20,
+      backgroundColor: 'rgba(0,0,0,0.7)',
+      padding: '10px',
+      borderRadius: '5px',
+      zIndex: 30
+    },
+    previewImage: {
+      width: '150px',
+      height: '150px',
+      objectFit: 'cover',
+      borderRadius: '5px'
     }
   };
 
@@ -369,6 +377,16 @@ const App = () => {
         <div>Match Score: {matchScore.toFixed(1)}%</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
       </div>
+
+      {imageUrl && (
+        <div style={styles.imagePreview}>
+          <img 
+            src={imageUrl} 
+            alt="Target" 
+            style={styles.previewImage}
+          />
+        </div>
+      )}
     </div>
   );
 };
