@@ -12,28 +12,23 @@ const firebaseConfig = {
   measurementId: "G-N5Q9K9G3JN"
 };
 
-// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const App = () => {
-  // Constants for image matching
   const MATCH_THRESHOLD = 65;
   const REFERENCE_WIDTH = 320;
   const REFERENCE_HEIGHT = 240;
   const BLOCK_SIZE = 4;
   
-  // URL Parameters
   const contentKey = new URLSearchParams(window.location.search).get('key');
   
-  // Refs
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const referenceCanvasRef = useRef(document.createElement('canvas'));
   const animationFrameRef = useRef(null);
   
-  // State
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
@@ -42,7 +37,6 @@ const App = () => {
   const [referenceImageLoaded, setReferenceImageLoaded] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
 
-  // Color space conversion utilities
   const rgbToHsv = useCallback((r, g, b) => {
     r /= 255;
     g /= 255;
@@ -58,122 +52,127 @@ const App = () => {
 
     if (diff !== 0) {
       switch (max) {
-        case r: h = 60 * ((g - b) / diff + (g < b ? 6 : 0)); break;
-        case g: h = 60 * ((b - r) / diff + 2); break;
-        case b: h = 60 * ((r - g) / diff + 4); break;
-        default: h = 0;  break;
+        case r: 
+          h = 60 * ((g - b) / diff + (g < b ? 6 : 0)); 
+          break;
+        case g: 
+          h = 60 * ((b - r) / diff + 2); 
+          break;
+        case b: 
+          h = 60 * ((r - g) / diff + 4); 
+          break;
+        default:
+          h = 0;
+          break;
       }
     }
     
     return [h, s * 100, v * 100];
   }, []);
 
-  // Enhanced image comparison algorithm
   const compareImages = useCallback((currentFrame, referenceCanvas) => {
-    const ctx = referenceCanvas.getContext('2d', { willReadFrequency: true });
-    const referenceFrame = ctx.getImageData(0, 0, referenceCanvas.width, referenceCanvas.height);
-    
-    const width = referenceCanvas.width;
-    const height = referenceCanvas.height;
-    
-    const weights = {
-      hue: 0.4,
-      saturation: 0.3,
-      value: 0.3
-    };
-    
-    const tolerances = {
-      hue: 20,
-      saturation: 20,
-      value: 25
-    };
-    
-    let matchCount = 0;
-    let totalBlocks = 0;
-    let significantBlocksCount = 0;
+    try {
+      const ctx = referenceCanvas.getContext('2d', { willReadFrequency: true });
+      const referenceFrame = ctx.getImageData(0, 0, referenceCanvas.width, referenceCanvas.height);
+      
+      const width = referenceCanvas.width;
+      const height = referenceCanvas.height;
+      
+      const weights = {
+        hue: 0.4,
+        saturation: 0.3,
+        value: 0.3
+      };
+      
+      const tolerances = {
+        hue: 20,
+        saturation: 20,
+        value: 25
+      };
+      
+      let matchCount = 0;
+      let totalBlocks = 0;
+      let significantBlocksCount = 0;
+      const edgeThreshold = 30;
 
-    // Edge detection threshold
-    const edgeThreshold = 30;
+      for (let y = 0; y < height; y += BLOCK_SIZE) {
+        for (let x = 0; x < width; x += BLOCK_SIZE) {
+          let blockScore = 0;
+          let blockPixels = 0;
+          let isSignificantBlock = false;
 
-    for (let y = 0; y < height; y += BLOCK_SIZE) {
-      for (let x = 0; x < width; x += BLOCK_SIZE) {
-        let blockScore = 0;
-        let blockPixels = 0;
-        let isSignificantBlock = false;
-
-        // Analyze block significance based on edge detection
-        for (let by = 0; by < BLOCK_SIZE && y + by < height; by++) {
-          for (let bx = 0; bx < BLOCK_SIZE && x + bx < width; bx++) {
-            const i = ((y + by) * width + (x + bx)) * 4;
-            
-            const rgb1 = {
-              r: currentFrame.data[i],
-              g: currentFrame.data[i + 1],
-              b: currentFrame.data[i + 2]
-            };
-            
-            const rgb2 = {
-              r: referenceFrame.data[i],
-              g: referenceFrame.data[i + 1],
-              b: referenceFrame.data[i + 2]
-            };
-
-            // Check for edges in reference image
-            if (bx < BLOCK_SIZE - 1 && by < BLOCK_SIZE - 1) {
-              const nextI = ((y + by) * width + (x + bx + 1)) * 4;
-              const bottomI = ((y + by + 1) * width + (x + bx)) * 4;
+          for (let by = 0; by < BLOCK_SIZE && y + by < height; by++) {
+            for (let bx = 0; bx < BLOCK_SIZE && x + bx < width; bx++) {
+              const i = ((y + by) * width + (x + bx)) * 4;
               
-              const horizontalDiff = Math.abs(referenceFrame.data[i] - referenceFrame.data[nextI]);
-              const verticalDiff = Math.abs(referenceFrame.data[i] - referenceFrame.data[bottomI]);
+              const rgb1 = {
+                r: currentFrame.data[i],
+                g: currentFrame.data[i + 1],
+                b: currentFrame.data[i + 2]
+              };
               
-              if (horizontalDiff > edgeThreshold || verticalDiff > edgeThreshold) {
-                isSignificantBlock = true;
+              const rgb2 = {
+                r: referenceFrame.data[i],
+                g: referenceFrame.data[i + 1],
+                b: referenceFrame.data[i + 2]
+              };
+
+              if (bx < BLOCK_SIZE - 1 && by < BLOCK_SIZE - 1) {
+                const nextI = ((y + by) * width + (x + bx + 1)) * 4;
+                const bottomI = ((y + by + 1) * width + (x + bx)) * 4;
+                
+                const horizontalDiff = Math.abs(referenceFrame.data[i] - referenceFrame.data[nextI]);
+                const verticalDiff = Math.abs(referenceFrame.data[i] - referenceFrame.data[bottomI]);
+                
+                if (horizontalDiff > edgeThreshold || verticalDiff > edgeThreshold) {
+                  isSignificantBlock = true;
+                }
               }
+
+              const hsv1 = rgbToHsv(rgb1.r, rgb1.g, rgb1.b);
+              const hsv2 = rgbToHsv(rgb2.r, rgb2.g, rgb2.b);
+
+              const hueDiff = Math.min(
+                Math.abs(hsv1[0] - hsv2[0]),
+                360 - Math.abs(hsv1[0] - hsv2[0])
+              );
+              const satDiff = Math.abs(hsv1[1] - hsv2[1]);
+              const valDiff = Math.abs(hsv1[2] - hsv2[2]);
+
+              const scores = {
+                hue: hueDiff <= tolerances.hue ? 1 - (hueDiff / tolerances.hue) : 0,
+                saturation: satDiff <= tolerances.saturation ? 1 - (satDiff / tolerances.saturation) : 0,
+                value: valDiff <= tolerances.value ? 1 - (valDiff / tolerances.value) : 0
+              };
+
+              const pixelScore = 
+                scores.hue * weights.hue +
+                scores.saturation * weights.saturation +
+                scores.value * weights.value;
+
+              blockScore += pixelScore;
+              blockPixels++;
             }
-
-            const hsv1 = rgbToHsv(rgb1.r, rgb1.g, rgb1.b);
-            const hsv2 = rgbToHsv(rgb2.r, rgb2.g, rgb2.b);
-
-            const hueDiff = Math.min(
-              Math.abs(hsv1[0] - hsv2[0]),
-              360 - Math.abs(hsv1[0] - hsv2[0])
-            );
-            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
-            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
-
-            const scores = {
-              hue: hueDiff <= tolerances.hue ? 1 - (hueDiff / tolerances.hue) : 0,
-              saturation: satDiff <= tolerances.saturation ? 1 - (satDiff / tolerances.saturation) : 0,
-              value: valDiff <= tolerances.value ? 1 - (valDiff / tolerances.value) : 0
-            };
-
-            const pixelScore = 
-              scores.hue * weights.hue +
-              scores.saturation * weights.saturation +
-              scores.value * weights.value;
-
-            blockScore += pixelScore;
-            blockPixels++;
           }
-        }
 
-        if (isSignificantBlock) {
-          significantBlocksCount++;
-          if (blockPixels > 0 && (blockScore / blockPixels) > 0.7) {
-            matchCount++;
+          if (isSignificantBlock) {
+            significantBlocksCount++;
+            if (blockPixels > 0 && (blockScore / blockPixels) > 0.7) {
+              matchCount++;
+            }
           }
+          totalBlocks++;
         }
-        totalBlocks++;
       }
+
+      const significantBlockRatio = significantBlocksCount / totalBlocks;
+      const normalizedScore = (matchCount / Math.max(1, significantBlocksCount)) * 100;
+      return normalizedScore * (0.7 + 0.3 * significantBlockRatio);
+    } catch (error) {
+      console.error('Error in compareImages:', error);
+      return 0;
     }
-
-    // Weight the score based on significant blocks
-    const significantBlockRatio = significantBlocksCount / totalBlocks;
-    const normalizedScore = (matchCount / significantBlocksCount) * 100;
-    return normalizedScore * (0.7 + 0.3 * significantBlockRatio);
   }, [rgbToHsv]);
-
-  // Video playback control
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
@@ -204,76 +203,80 @@ const App = () => {
     }
   }, [videoUrl, isVideoPlaying]);
 
-  // Frame processing
   const processFrame = useCallback(() => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const referenceCanvas = referenceCanvasRef.current;
-
-    if (!video || !canvas || !video.videoWidth || !referenceImageLoaded) {
+    if (!videoRef.current || !canvasRef.current || !referenceImageLoaded) {
       animationFrameRef.current = requestAnimationFrame(processFrame);
       return;
     }
 
-    const context = canvas.getContext('2d', { willReadFrequency: true });
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const referenceCanvas = referenceCanvasRef.current;
 
-    // Update canvas dimensions if needed
-    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-    }
+    try {
+      const context = canvas.getContext('2d', { willReadFrequency: true });
+      
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+      }
 
-    // Create temporary canvas for scaled comparison
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = REFERENCE_WIDTH;
-    tempCanvas.height = REFERENCE_HEIGHT;
-    const tempContext = tempCanvas.getContext('2d', { willReadFrequency: true });
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = REFERENCE_WIDTH;
+      tempCanvas.height = REFERENCE_HEIGHT;
+      const tempContext = tempCanvas.getContext('2d', { willReadFrequency: true });
 
-    // Draw and scale video frame
-    context.drawImage(video, 0, 0);
-    tempContext.drawImage(video, 0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
-    
-    const currentFrame = tempContext.getImageData(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
-    const score = compareImages(currentFrame, referenceCanvas);
-    
-    setMatchScore(score);
+      context.drawImage(video, 0, 0);
+      tempContext.drawImage(video, 0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+      
+      const currentFrame = tempContext.getImageData(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+      const score = compareImages(currentFrame, referenceCanvas);
+      
+      setMatchScore(score);
 
-    if (score > MATCH_THRESHOLD && !isVideoPlaying) {
-      startVideo();
+      if (score > MATCH_THRESHOLD && !isVideoPlaying) {
+        startVideo();
+      }
+    } catch (error) {
+      console.error('Error in processFrame:', error);
     }
 
     animationFrameRef.current = requestAnimationFrame(processFrame);
-  }, [compareImages, isVideoPlaying, startVideo, referenceImageLoaded]);
+  }, [compareImages, isVideoPlaying, startVideo, referenceImageLoaded, REFERENCE_WIDTH, REFERENCE_HEIGHT, MATCH_THRESHOLD]);
 
-  // Reference image loading
   const loadReferenceImage = useCallback(async (url) => {
     return new Promise((resolve, reject) => {
+      if (!url) {
+        reject(new Error('No URL provided'));
+        return;
+      }
+
       const img = new Image();
       img.crossOrigin = "anonymous";
       
       img.onload = () => {
-        const canvas = referenceCanvasRef.current;
-        canvas.width = REFERENCE_WIDTH;
-        canvas.height = REFERENCE_HEIGHT;
-        
-        const ctx = canvas.getContext('2d', { willReadFrequency: true });
-        ctx.drawImage(img, 0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
-        setReferenceImageLoaded(true);
-        resolve();
+        try {
+          const canvas = referenceCanvasRef.current;
+          canvas.width = REFERENCE_WIDTH;
+          canvas.height = REFERENCE_HEIGHT;
+          
+          const ctx = canvas.getContext('2d', { willReadFrequency: true });
+          ctx.drawImage(img, 0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+          setReferenceImageLoaded(true);
+          setDebugInfo('Reference image loaded');
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
       };
       
-      img.onerror = (error) => {
-        console.error('Reference image loading error:', error);
-        setDebugInfo('Failed to load reference image');
-        reject(error);
-      };
-      
+      img.onerror = reject;
       img.src = url;
     });
-  }, []);
+  }, [REFERENCE_WIDTH, REFERENCE_HEIGHT]);
 
-  // Camera initialization
   useEffect(() => {
+    let mounted = true;
     let stream = null;
 
     const startCamera = async () => {
@@ -286,7 +289,7 @@ const App = () => {
           }
         });
 
-        if (videoRef.current) {
+        if (mounted && videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
           setCameraActive(true);
@@ -294,16 +297,19 @@ const App = () => {
           animationFrameRef.current = requestAnimationFrame(processFrame);
         }
       } catch (error) {
-        console.error('Camera initialization error:', error);
-        setDebugInfo(`Camera error: ${error.message}`);
+        if (mounted) {
+          console.error('Camera error:', error);
+          setDebugInfo(`Camera error: ${error.message}`);
+        }
       }
     };
 
-    if (videoUrl && referenceImageLoaded) {
+    if (referenceImageLoaded) {
       startCamera();
     }
 
     return () => {
+      mounted = false;
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
@@ -311,9 +317,7 @@ const App = () => {
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [processFrame, videoUrl, referenceImageLoaded]);
-
-  // Content loading
+  }, [processFrame, referenceImageLoaded]);
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -344,21 +348,13 @@ const App = () => {
         setImageUrl(data.imageUrl);
         
         await loadReferenceImage(data.imageUrl);
-        setDebugInfo('Content loaded - Starting camera');
-
       } catch (error) {
         console.error('Content loading error:', error);
-        setDebugInfo(`Error loading content: ${error.message}`);
+        setDebugInfo(`Error: ${error.message}`);
       }
     };
 
     loadContent();
-
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-    };
   }, [contentKey, loadReferenceImage]);
 
   const styles = {
@@ -412,7 +408,7 @@ const App = () => {
       right: 20,
       backgroundColor: 'rgba(0,0,0,0.7)',
       padding: '10px',
-borderRadius: '5px',
+      borderRadius: '5px',
       zIndex: 30,
       boxShadow: '0 2px 8px rgba(0,0,0,0.2)'
     },
@@ -438,26 +434,8 @@ borderRadius: '5px',
     }
   };
 
-  const renderDebugInfo = () => (
-    <div style={styles.debugInfo}>
-      <div>Status: {debugInfo}</div>
-      <div>Content Key: {contentKey || 'Not found'}</div>
-      <div>Camera: {cameraActive ? 'Active' : 'Inactive'}</div>
-      <div>Reference Image: {referenceImageLoaded ? 'Loaded' : 'Loading...'}</div>
-      <div>Match Score: {matchScore.toFixed(1)}%</div>
-      <div>Video State: {isVideoPlaying ? 'Playing' : 'Waiting'}</div>
-    </div>
-  );
-
-  const renderMatchIndicator = () => (
-    <div style={styles.matchIndicator}>
-      {matchScore > MATCH_THRESHOLD ? 'Match Found!' : 'Scanning...'}
-    </div>
-  );
-
   return (
     <div style={styles.container}>
-      {/* Main video feed from camera */}
       <video
         ref={videoRef}
         autoPlay
@@ -466,13 +444,11 @@ borderRadius: '5px',
         style={styles.video}
       />
 
-      {/* Canvas for image processing */}
       <canvas
         ref={canvasRef}
         style={styles.canvas}
       />
 
-      {/* Overlay video that plays when match is found */}
       {videoUrl && (
         <video
           ref={overlayVideoRef}
@@ -485,21 +461,25 @@ borderRadius: '5px',
         />
       )}
 
-      {/* Debug information */}
-      {renderDebugInfo()}
+      <div style={styles.debugInfo}>
+        <div>Status: {debugInfo}</div>
+        <div>Content Key: {contentKey || 'Not found'}</div>
+        <div>Camera: {cameraActive ? 'Active' : 'Inactive'}</div>
+        <div>Reference Image: {referenceImageLoaded ? 'Loaded' : 'Loading...'}</div>
+        <div>Match Score: {matchScore.toFixed(1)}%</div>
+        <div>Video State: {isVideoPlaying ? 'Playing' : 'Waiting'}</div>
+      </div>
 
-      {/* Match indicator */}
-      {renderMatchIndicator()}
+      <div style={styles.matchIndicator}>
+        {matchScore > MATCH_THRESHOLD ? 'Match Found!' : 'Scanning...'}
+      </div>
 
-      {/* Reference image preview */}
       {imageUrl && (
         <div style={styles.imagePreview}>
           <img 
             src={imageUrl} 
             alt="Target" 
             style={styles.previewImage}
-            onLoad={() => setDebugInfo('Reference image preview loaded')}
-            onError={() => setDebugInfo('Error loading preview image')}
           />
         </div>
       )}
