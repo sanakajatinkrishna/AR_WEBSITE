@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
+import { getStorage, ref, getDownloadURL } from 'firebase/storage';
 import { getFirestore, collection, getDocs } from 'firebase/firestore';
 
 // Initialize Firebase (replace with your config)
@@ -14,82 +15,26 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
+const storage = getStorage(app);
+
 const db = getFirestore(app);
 
 const ImageMatcher = () => {
+  // Refs
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+
+  // State management
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(null);
   const [error, setError] = useState(null);
   const [referenceImages, setReferenceImages] = useState([]);
   const [selectedImage, setSelectedImage] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [imageLoading, setImageLoading] = useState(false);
+  const [referenceImageData, setReferenceImageData] = useState(null);
 
-  // Fetch reference images from Firestore
-  useEffect(() => {
-    const fetchImages = async () => {
-      try {
-        const querySnapshot = await getDocs(collection(db, 'arContent'));
-        const images = [];
-        
-        for (const doc of querySnapshot.docs) {
-          const data = doc.data();
-          if (data.isActive && data.imageUrl) {
-            images.push({
-              id: doc.id,
-              url: data.imageUrl,
-              contentKey: data.contentKey
-            });
-          }
-        }
-        
-        setReferenceImages(images);
-        if (images.length > 0) {
-          setSelectedImage(images[0]);
-        }
-        setLoading(false);
-      } catch (err) {
-        console.error('Error fetching images:', err);
-        setError('Failed to load reference images');
-        setLoading(false);
-      }
-    };
-
-    fetchImages();
-  }, []);
-
-  // Start camera stream
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        } 
-      });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        setIsStreaming(true);
-        setError(null);
-      }
-    } catch (err) {
-      setError('Unable to access camera. Please ensure you have granted camera permissions.');
-      console.error('Error accessing camera:', err);
-    }
-  };
-
-  // Stop camera stream
-  const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-      setIsStreaming(false);
-    }
-  };
-
-  // Convert RGB to HSV for better comparison
+  // RGB to HSV conversion for better color comparison
   const rgbToHsv = (r, g, b) => {
     r /= 255;
     g /= 255;
@@ -122,7 +67,7 @@ const ImageMatcher = () => {
     return [h, s * 100, v * 100];
   };
 
-  // Compare images using HSV color space and regional comparison
+  // Image comparison function
   const compareImages = useCallback((imgData1, imgData2) => {
     const width = imgData1.width;
     const height = imgData1.height;
@@ -186,38 +131,155 @@ const ImageMatcher = () => {
     return Math.min(100, rawPercentage * 1.5);
   }, []);
 
-  // Capture and compare frame
+  // Camera stream management
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      });
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current.play();
+          setIsStreaming(true);
+          setError(null);
+        };
+      }
+    } catch (err) {
+      setError('Unable to access camera. Please ensure you have granted camera permissions.');
+      console.error('Error accessing camera:', err);
+    }
+  };
+
+  const stopCamera = () => {
+    if (videoRef.current?.srcObject) {
+      const tracks = videoRef.current.srcObject.getTracks();
+      tracks.forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+      setIsStreaming(false);
+    }
+  };
+
+  // Frame capture and comparison
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !selectedImage) return;
+    if (!videoRef.current || !canvasRef.current || !referenceImageData) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
+    // Match canvas dimensions to video
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
+    // Capture current frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
-    const refImg = new Image();
-    refImg.crossOrigin = "anonymous";
-    refImg.src = selectedImage.url;
-    
-    refImg.onload = () => {
-      context.clearRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(refImg, 0, 0, canvas.width, canvas.height);
-      const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
-      
-      const score = compareImages(capturedFrame, referenceData);
-      setMatchScore(score);
-    };
-  }, [compareImages, selectedImage]);
+    // Compare with reference image
+    const score = compareImages(capturedFrame, referenceImageData.data);
+    setMatchScore(score);
+  }, [compareImages, referenceImageData]);
 
-  // Set up continuous comparison when streaming is active
+  // Fetch reference images from Firestore
+  useEffect(() => {
+    const fetchImages = async () => {
+      try {
+        const querySnapshot = await getDocs(collection(db, 'arContent'));
+        const images = [];
+        
+        for (const doc of querySnapshot.docs) {
+          const data = doc.data();
+          if (data.isActive && data.imageUrl) {
+            images.push({
+              id: doc.id,
+              url: data.imageUrl,
+              contentKey: data.contentKey,
+              fileName: data.fileName?.image
+            });
+          }
+        }
+        
+        setReferenceImages(images);
+        if (images.length > 0) {
+          setSelectedImage(images[0]);
+        }
+        setLoading(false);
+      } catch (err) {
+        console.error('Error fetching images:', err);
+        setError('Failed to load reference images');
+        setLoading(false);
+      }
+    };
+
+    fetchImages();
+  }, []);
+
+  // Load and process reference image
+  useEffect(() => {
+    const loadReferenceImage = async () => {
+      if (!selectedImage) return;
+      
+      setImageLoading(true);
+      setError(null);
+      
+      try {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+
+        const imageLoadPromise = new Promise((resolve, reject) => {
+          img.onload = () => resolve(img);
+          img.onerror = () => reject(new Error('Failed to load image'));
+        });
+
+        // Get fresh download URL from Firebase
+        let imageUrl = selectedImage.url;
+        if (selectedImage.fileName) {
+          try {
+            const imageRef = ref(storage, selectedImage.fileName);
+            imageUrl = await getDownloadURL(imageRef);
+          } catch (err) {
+            console.warn('Failed to get fresh download URL, using stored URL');
+          }
+        }
+
+        img.src = imageUrl;
+        await imageLoadPromise;
+
+        // Process image data
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        context.drawImage(img, 0, 0);
+        const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+
+        setReferenceImageData({
+          element: img,
+          data: imageData,
+          url: imageUrl
+        });
+        setImageLoading(false);
+        setError(null);
+      } catch (err) {
+        console.error('Error loading reference image:', err);
+        setError('Failed to load reference image. Please try again or select a different image.');
+        setImageLoading(false);
+      }
+    };
+
+    loadReferenceImage();
+  }, [selectedImage]);
+
+  // Set up continuous comparison when streaming
   useEffect(() => {
     let intervalId;
-    if (isStreaming) {
+    if (isStreaming && referenceImageData) {
       intervalId = setInterval(captureFrame, 500);
     }
     return () => {
@@ -225,7 +287,7 @@ const ImageMatcher = () => {
         clearInterval(intervalId);
       }
     };
-  }, [isStreaming, captureFrame]);
+  }, [isStreaming, captureFrame, referenceImageData]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -235,7 +297,16 @@ const ImageMatcher = () => {
   }, []);
 
   if (loading) {
-    return <div>Loading reference images...</div>;
+    return (
+      <div style={{ 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        height: '100vh' 
+      }}>
+        Loading reference images...
+      </div>
+    );
   }
 
   return (
@@ -292,16 +363,26 @@ const ImageMatcher = () => {
             aspectRatio: '16/9',
             backgroundColor: '#f3f4f6',
             borderRadius: '8px',
-            overflow: 'hidden'
+            overflow: 'hidden',
+            position: 'relative'
           }}>
-            {selectedImage && (
+            {imageLoading ? (
+              <div style={{
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
+                transform: 'translate(-50%, -50%)'
+              }}>
+                Loading image...
+              </div>
+            ) : referenceImageData ? (
               <img 
-                src={selectedImage.url}
+                src={referenceImageData.url}
                 alt="Reference"
                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                 crossOrigin="anonymous"
               />
-            )}
+            ) : null}
             <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
           </div>
           <div style={{ 
@@ -327,13 +408,15 @@ const ImageMatcher = () => {
         <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
           <button
             onClick={isStreaming ? stopCamera : startCamera}
+            disabled={imageLoading}
             style={{
               padding: '8px 16px',
               backgroundColor: isStreaming ? '#dc2626' : '#2563eb',
               color: 'white',
               border: 'none',
               borderRadius: '4px',
-              cursor: 'pointer'
+              cursor: imageLoading ? 'not-allowed' : 'pointer',
+              opacity: imageLoading ? 0.5 : 1
             }}
           >
             {isStreaming ? "Stop Camera" : "Start Camera"}
