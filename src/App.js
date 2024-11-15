@@ -12,15 +12,16 @@ const ImageMatcher = ({ contentKey }) => {
   const [isLoading, setIsLoading] = useState(true);
 
   // Initialize Firebase (make sure to replace with your config)
-  const firebaseConfig = {
-    // Your Firebase config here
-    apiKey: "YOUR_API_KEY",
-    authDomain: "YOUR_AUTH_DOMAIN",
-    projectId: "YOUR_PROJECT_ID",
-    storageBucket: "YOUR_STORAGE_BUCKET",
-    messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-    appId: "YOUR_APP_ID"
-  };
+const firebaseConfig = {
+  apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
+  authDomain: "app-1238f.firebaseapp.com",
+  projectId: "app-1238f",
+  storageBucket: "app-1238f.appspot.com",
+  messagingSenderId: "12576842624",
+  appId: "1:12576842624:web:92eb40fd8c56a9fc475765",
+  measurementId: "G-N5Q9K9G3JN"
+};
+
 
   const app = initializeApp(firebaseConfig);
   const storage = getStorage(app);
