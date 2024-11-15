@@ -25,52 +25,17 @@ const db = getFirestore(app);
 const ImageMatcher = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const markerImageRef = useRef(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(null);
-  const [referenceImage, setReferenceImage] = useState(null);
   const [selectedMarker, setSelectedMarker] = useState(null);
   const [contentKey, setContentKey] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
 
   // Get content key from URL
   const getContentKey = useCallback(() => {
     const urlParams = new URLSearchParams(window.location.search);
     return urlParams.get('key');
   }, []);
-
-  // Load marker image
-  const loadMarkerImage = useCallback(async (imageUrl) => {
-    if (!imageUrl) return;
-
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      
-      img.onload = () => {
-        setReferenceImage(img);
-        setIsLoading(false);
-        resolve(img);
-      };
-      
-      img.onerror = () => {
-        reject(new Error('Failed to load image'));
-      };
-      
-      img.src = imageUrl;
-    });
-  }, []);
-
-  // Handle marker selection
-  const handleMarkerSelect = useCallback(async (marker) => {
-    if (!marker?.imageUrl) return;
-    
-    setSelectedMarker(marker);
-    try {
-      await loadMarkerImage(marker.imageUrl);
-    } catch (error) {
-      console.error('Error loading marker image:', error);
-    }
-  }, [loadMarkerImage]);
 
   // Compare images
   const compareImages = useCallback((imgData1, imgData2) => {
@@ -117,25 +82,28 @@ const ImageMatcher = () => {
 
   // Capture and compare frame
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !referenceImage) return;
+    if (!videoRef.current || !canvasRef.current || !markerImageRef.current) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
+    // Set canvas size to match video
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
+    // Draw and capture current video frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
+    // Draw and capture marker image
     context.clearRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(referenceImage, 0, 0, canvas.width, canvas.height);
-    const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
+    context.drawImage(markerImageRef.current, 0, 0, canvas.width, canvas.height);
+    const markerData = context.getImageData(0, 0, canvas.width, canvas.height);
     
-    const score = compareImages(capturedFrame, referenceData);
+    const score = compareImages(capturedFrame, markerData);
     setMatchScore(score);
-  }, [compareImages, referenceImage]);
+  }, [compareImages]);
 
   // Start camera
   const startCamera = useCallback(async () => {
@@ -182,27 +150,27 @@ const ImageMatcher = () => {
       where('isActive', '==', true)
     );
 
-    const unsubscribe = onSnapshot(markerQuery, async (snapshot) => {
+    const unsubscribe = onSnapshot(markerQuery, (snapshot) => {
       if (!snapshot.empty) {
         const markerData = {
           id: snapshot.docs[0].id,
           ...snapshot.docs[0].data()
         };
-        await handleMarkerSelect(markerData);
+        setSelectedMarker(markerData);
       }
     });
 
     return () => unsubscribe();
-  }, [getContentKey, handleMarkerSelect]);
+  }, [getContentKey]);
 
   // Capture interval
   useEffect(() => {
     let intervalId;
-    if (isStreaming && referenceImage) {
+    if (isStreaming && selectedMarker) {
       intervalId = setInterval(captureFrame, 500);
     }
     return () => intervalId && clearInterval(intervalId);
-  }, [isStreaming, captureFrame, referenceImage]);
+  }, [isStreaming, captureFrame, selectedMarker]);
 
   // Cleanup
   useEffect(() => {
@@ -215,13 +183,7 @@ const ImageMatcher = () => {
         AR Image Matcher
       </h1>
 
-      {isLoading && (
-        <div style={{ textAlign: 'center', marginBottom: '20px', color: '#666' }}>
-          Loading marker image...
-        </div>
-      )}
-
-      {contentKey && !isLoading && (
+      {contentKey && (
         <div style={{ textAlign: 'center', marginBottom: '20px', color: '#666' }}>
           <p>Content Key: {contentKey}</p>
         </div>
@@ -241,6 +203,7 @@ const ImageMatcher = () => {
         }}>
           {selectedMarker && (
             <img 
+              ref={markerImageRef}
               src={selectedMarker.imageUrl}
               alt="Reference"
               style={{ width: '100%', height: '100%', objectFit: 'cover' }}
@@ -269,23 +232,21 @@ const ImageMatcher = () => {
       </div>
 
       <div style={{ marginBottom: '20px', textAlign: 'center' }}>
-        {!isLoading && (
-          <button
-            onClick={isStreaming ? stopCamera : startCamera}
-            disabled={!selectedMarker}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: isStreaming ? '#dc2626' : '#3b82f6',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: selectedMarker ? 'pointer' : 'not-allowed',
-              opacity: selectedMarker ? 1 : 0.5
-            }}
-          >
-            {isStreaming ? "Stop Camera" : "Start Camera"}
-          </button>
-        )}
+        <button
+          onClick={isStreaming ? stopCamera : startCamera}
+          disabled={!selectedMarker}
+          style={{
+            padding: '8px 16px',
+            backgroundColor: isStreaming ? '#dc2626' : '#3b82f6',
+            color: 'white',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: selectedMarker ? 'pointer' : 'not-allowed',
+            opacity: selectedMarker ? 1 : 0.5
+          }}
+        >
+          {isStreaming ? "Stop Camera" : "Start Camera"}
+        </button>
       </div>
 
       {matchScore !== null && (
