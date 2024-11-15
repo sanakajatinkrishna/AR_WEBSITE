@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getFirestore, collection, query, where, onSnapshot } from 'firebase/firestore';
+import { getStorage, ref, getDownloadURL } from 'firebase/storage';
 
 // Firebase configuration
 const firebaseConfig = {
@@ -21,6 +22,7 @@ if (!getApps().length) {
   app = getApp();
 }
 const db = getFirestore(app);
+const storage = getStorage(app);
 
 const ImageMatcher = () => {
   const videoRef = useRef(null);
@@ -29,9 +31,9 @@ const ImageMatcher = () => {
   const [matchScore, setMatchScore] = useState(null);
   const [referenceImage, setReferenceImage] = useState(null);
   const [selectedMarker, setSelectedMarker] = useState(null);
-  const [contentKey, setContentKey] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [imageUrl, setImageUrl] = useState(null);
 
   // Get content key from URL
   const getContentKey = useCallback(() => {
@@ -39,63 +41,53 @@ const ImageMatcher = () => {
     return urlParams.get('key');
   }, []);
 
-  // Load marker image with verification
-const loadMarkerImage = useCallback(async (imageUrl) => {
-  if (!imageUrl) {
-    setError('No image URL provided');
-    return;
-  }
+  // Load marker image with improved error handling
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const loadMarkerImage = useCallback(async (imageUrl) => {
+    if (!imageUrl) {
+      setError('No image URL provided');
+      return null;
+    }
 
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    
-    // Set crossOrigin before setting src
-    img.crossOrigin = "anonymous";
-    
-    img.onload = () => {
-      // Create a temporary canvas
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = img.width;
-      tempCanvas.height = img.height;
-      
-      const tempContext = tempCanvas.getContext('2d');
-      
-      try {
-        // Draw the image to the temporary canvas
-        tempContext.drawImage(img, 0, 0);
+    setIsLoading(true);
+
+    try {
+      // If the URL is a Firebase Storage path, get the download URL
+      if (imageUrl.startsWith('gs://')) {
+        const storageRef = ref(storage, imageUrl);
+        imageUrl = await getDownloadURL(storageRef);
+      }
+
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
         
-        // Try to access the image data to verify it's loaded correctly
-        try {
-          tempContext.getImageData(0, 0, img.width, img.height);
+        img.onload = () => {
           setReferenceImage(img);
+          setImageUrl(imageUrl);
           setIsLoading(false);
           setError(null);
           resolve(img);
-        } catch (e) {
-          // If we can't access the image data, try with a proxy
-          const proxyUrl = `https://cors-anywhere.herokuapp.com/${imageUrl}`;
-          img.src = proxyUrl;
-        }
-      } catch (error) {
-        console.error('Error processing image:', error);
-        setError('Error processing image');
-        reject(error);
-      }
-    };
-    
-    img.onerror = (error) => {
-      console.error('Error loading image:', error);
-      // Try loading with proxy if direct loading fails
-      const proxyUrl = `https://cors-anywhere.herokuapp.com/${imageUrl}`;
-      img.src = proxyUrl;
-    };
-    
-    // Set the source after setting up event handlers
-    img.src = imageUrl;
-  });
-}, []);
+        };
+        
+        img.onerror = (error) => {
+          console.error('Error loading image:', error);
+          setError('Failed to load image');
+          setIsLoading(false);
+          reject(error);
+        };
+        
+        img.src = imageUrl;
+      });
+    } catch (error) {
+      console.error('Error processing image URL:', error);
+      setError('Error loading image from Firebase');
+      setIsLoading(false);
+      return null;
+    }
+  }, []);
 
-  // Handle marker selection
+  // Handle marker selection with improved Firebase handling
   const handleMarkerSelect = useCallback(async (marker) => {
     if (!marker?.imageUrl) {
       setError('Invalid marker data');
@@ -103,15 +95,7 @@ const loadMarkerImage = useCallback(async (imageUrl) => {
     }
     
     setSelectedMarker(marker);
-    setIsLoading(true);
-    setError(null);
-    
-    try {
-      await loadMarkerImage(marker.imageUrl);
-    } catch (error) {
-      console.error('Error loading marker image:', error);
-      setIsLoading(false);
-    }
+    await loadMarkerImage(marker.imageUrl);
   }, [loadMarkerImage]);
 
   // Compare images with improved error handling
@@ -243,8 +227,6 @@ const loadMarkerImage = useCallback(async (imageUrl) => {
       return;
     }
 
-    setContentKey(key);
-    
     const arContentRef = collection(db, 'arContent');
     const markerQuery = query(
       arContentRef,
@@ -303,18 +285,6 @@ const loadMarkerImage = useCallback(async (imageUrl) => {
         </div>
       )}
 
-      {isLoading && (
-        <div style={{ textAlign: 'center', marginBottom: '20px', color: '#666' }}>
-          Loading marker image...
-        </div>
-      )}
-
-      {contentKey && !isLoading && (
-        <div style={{ textAlign: 'center', marginBottom: '20px', color: '#666' }}>
-          <p>Content Key: {contentKey}</p>
-        </div>
-      )}
-
       <div style={{
         display: 'grid',
         gridTemplateColumns: '1fr 1fr',
@@ -325,16 +295,36 @@ const loadMarkerImage = useCallback(async (imageUrl) => {
           backgroundColor: '#f3f4f6',
           borderRadius: '8px',
           overflow: 'hidden',
-          aspectRatio: '16/9'
+          aspectRatio: '16/9',
+          position: 'relative'
         }}>
-          {selectedMarker && (
-            <img 
-              src={selectedMarker.imageUrl}
-              alt="Reference"
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-            />
+          {isLoading && (
+            <div style={{
+              position: 'absolute',
+              top: '50%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              color: '#666'
+            }}>
+              Loading image...
+            </div>
           )}
-          <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
+          {!isLoading && imageUrl && (
+            <>
+              <img 
+                src={imageUrl}
+                alt="Reference"
+                style={{ 
+                  width: '100%', 
+                  height: '100%', 
+                  objectFit: 'cover',
+                  display: isLoading ? 'none' : 'block'
+                }}
+                onError={() => setError('Failed to load image')}
+              />
+              <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
+            </>
+          )}
         </div>
         <div style={{
           backgroundColor: '#f3f4f6',
@@ -357,23 +347,21 @@ const loadMarkerImage = useCallback(async (imageUrl) => {
       </div>
 
       <div style={{ marginBottom: '20px', textAlign: 'center' }}>
-        {!isLoading && (
-          <button
-            onClick={isStreaming ? stopCamera : startCamera}
-            disabled={!selectedMarker}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: isStreaming ? '#dc2626' : '#3b82f6',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: selectedMarker ? 'pointer' : 'not-allowed',
-              opacity: selectedMarker ? 1 : 0.5
-            }}
-          >
-            {isStreaming ? "Stop Camera" : "Start Camera"}
-          </button>
-        )}
+        <button
+          onClick={isStreaming ? stopCamera : startCamera}
+          disabled={!selectedMarker || isLoading}
+          style={{
+            padding: '8px 16px',
+            backgroundColor: isStreaming ? '#dc2626' : '#3b82f6',
+            color: 'white',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: (selectedMarker && !isLoading) ? 'pointer' : 'not-allowed',
+            opacity: (selectedMarker && !isLoading) ? 1 : 0.5
+          }}
+        >
+          {isStreaming ? "Stop Camera" : "Start Camera"}
+        </button>
       </div>
 
       {matchScore !== null && (
