@@ -16,19 +16,23 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const App = () => {
+  // Constants
   const MATCH_THRESHOLD = 65;
   const REFERENCE_WIDTH = 320;
   const REFERENCE_HEIGHT = 240;
   const BLOCK_SIZE = 4;
   
+  // URL Parameters
   const contentKey = new URLSearchParams(window.location.search).get('key');
   
+  // Refs
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const referenceCanvasRef = useRef(document.createElement('canvas'));
   const animationFrameRef = useRef(null);
   
+  // State
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
@@ -36,7 +40,9 @@ const App = () => {
   const [matchScore, setMatchScore] = useState(0);
   const [referenceImageLoaded, setReferenceImageLoaded] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
 
+  // Color conversion utility
   const rgbToHsv = useCallback((r, g, b) => {
     r /= 255;
     g /= 255;
@@ -69,7 +75,7 @@ const App = () => {
     
     return [h, s * 100, v * 100];
   }, []);
-
+  // Image comparison function
   const compareImages = useCallback((currentFrame, referenceCanvas) => {
     try {
       const ctx = referenceCanvas.getContext('2d', { willReadFrequency: true });
@@ -117,6 +123,7 @@ const App = () => {
                 b: referenceFrame.data[i + 2]
               };
 
+              // Edge detection
               if (bx < BLOCK_SIZE - 1 && by < BLOCK_SIZE - 1) {
                 const nextI = ((y + by) * width + (x + bx + 1)) * 4;
                 const bottomI = ((y + by + 1) * width + (x + bx)) * 4;
@@ -173,6 +180,8 @@ const App = () => {
       return 0;
     }
   }, [rgbToHsv]);
+
+  // Video playback control
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
@@ -203,6 +212,7 @@ const App = () => {
     }
   }, [videoUrl, isVideoPlaying]);
 
+  // Frame processing
   const processFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current || !referenceImageLoaded) {
       animationFrameRef.current = requestAnimationFrame(processFrame);
@@ -243,7 +253,7 @@ const App = () => {
 
     animationFrameRef.current = requestAnimationFrame(processFrame);
   }, [compareImages, isVideoPlaying, startVideo, referenceImageLoaded, REFERENCE_WIDTH, REFERENCE_HEIGHT, MATCH_THRESHOLD]);
-
+  // Reference image loading
   const loadReferenceImage = useCallback(async (url) => {
     return new Promise((resolve, reject) => {
       if (!url) {
@@ -251,10 +261,14 @@ const App = () => {
         return;
       }
 
+      console.log('Starting reference image load:', url);
+      setDebugInfo('Loading reference image...');
+
       const img = new Image();
       img.crossOrigin = "anonymous";
       
       img.onload = () => {
+        console.log('Reference image loaded, processing...');
         try {
           const canvas = referenceCanvasRef.current;
           canvas.width = REFERENCE_WIDTH;
@@ -262,71 +276,107 @@ const App = () => {
           
           const ctx = canvas.getContext('2d', { willReadFrequency: true });
           ctx.drawImage(img, 0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
-          setReferenceImageLoaded(true);
-          setDebugInfo('Reference image loaded');
-          resolve();
+          
+          // Verify the image data can be accessed
+          try {
+            const imageData = ctx.getImageData(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+            if (imageData.data.length === 0) {
+              throw new Error('Image data is empty');
+            }
+            console.log('Reference image processed successfully');
+            setReferenceImageLoaded(true);
+            setDebugInfo('Reference image ready');
+            resolve(true);
+          } catch (e) {
+            console.error('Failed to get image data:', e);
+            reject(new Error('Failed to process image data'));
+          }
         } catch (error) {
+          console.error('Error processing reference image:', error);
           reject(error);
         }
       };
       
-      img.onerror = reject;
+      img.onerror = (error) => {
+        console.error('Failed to load reference image:', error);
+        setDebugInfo('Failed to load reference image');
+        reject(error);
+      };
+
+      const timeoutId = setTimeout(() => {
+        img.src = '';
+        reject(new Error('Image loading timed out'));
+      }, 10000);
+
       img.src = url;
+
+      img.onload = () => {
+        clearTimeout(timeoutId);
+        img.onload();
+      };
     });
   }, [REFERENCE_WIDTH, REFERENCE_HEIGHT]);
 
-  useEffect(() => {
-    let mounted = true;
-    let stream = null;
-
-    const startCamera = async () => {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: 'environment',
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          }
-        });
-
-        if (mounted && videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-          setCameraActive(true);
-          setDebugInfo('Camera active - Show target image');
-          animationFrameRef.current = requestAnimationFrame(processFrame);
-        }
-      } catch (error) {
-        if (mounted) {
-          console.error('Camera error:', error);
-          setDebugInfo(`Camera error: ${error.message}`);
-        }
-      }
-    };
-
-    if (referenceImageLoaded) {
-      startCamera();
+  // Camera initialization
+  const initCamera = useCallback(async () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('Camera API not available');
     }
 
-    return () => {
-      mounted = false;
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
+    console.log('Initializing camera...');
+    setDebugInfo('Initializing camera...');
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      });
+
+      if (!videoRef.current) {
+        throw new Error('Video element not ready');
       }
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-    };
-  }, [processFrame, referenceImageLoaded]);
+
+      videoRef.current.srcObject = stream;
+      
+      return new Promise((resolve) => {
+        videoRef.current.onloadedmetadata = async () => {
+          try {
+            await videoRef.current.play();
+            setCameraActive(true);
+            setDebugInfo('Camera ready');
+            console.log('Camera initialized successfully');
+            resolve(stream);
+          } catch (error) {
+            console.error('Failed to start video playback:', error);
+            throw error;
+          }
+        };
+      });
+    } catch (error) {
+      console.error('Camera initialization failed:', error);
+      setDebugInfo(`Camera error: ${error.message}`);
+      throw error;
+    }
+  }, []);
+
+  // Content loading effect
   useEffect(() => {
-    const loadContent = async () => {
+    let mounted = true;
+    let currentStream = null;
+
+    const initialize = async () => {
       if (!contentKey) {
         setDebugInfo('No content key provided');
         return;
       }
 
       try {
+        setIsLoading(true);
         setDebugInfo('Loading content...');
+
         const arContentRef = collection(db, 'arContent');
         const q = query(
           arContentRef,
@@ -341,22 +391,67 @@ const App = () => {
           return;
         }
 
-        const doc = snapshot.docs[0];
-        const data = doc.data();
+        const data = snapshot.docs[0].data();
+        
+        if (!mounted) return;
 
         setVideoUrl(data.videoUrl);
         setImageUrl(data.imageUrl);
-        
-        await loadReferenceImage(data.imageUrl);
+
+        try {
+          await loadReferenceImage(data.imageUrl);
+          
+          if (!mounted) return;
+
+          if (referenceImageLoaded) {
+currentStream = await initCamera();
+          }
+        } catch (error) {
+          console.error('Failed to load reference image:', error);
+          setDebugInfo(`Image error: ${error.message}`);
+        }
+
       } catch (error) {
-        console.error('Content loading error:', error);
-        setDebugInfo(`Error: ${error.message}`);
+        console.error('Initialization error:', error);
+        if (mounted) {
+          setDebugInfo(`Error: ${error.message}`);
+        }
+      } finally {
+        if (mounted) {
+          setIsLoading(false);
+        }
       }
     };
 
-    loadContent();
-  }, [contentKey, loadReferenceImage]);
+    initialize();
 
+    return () => {
+      mounted = false;
+      if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
+      }
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [contentKey, loadReferenceImage, initCamera, referenceImageLoaded]);
+
+  // Frame processing effect
+  useEffect(() => {
+    if (referenceImageLoaded && cameraActive && !isLoading) {
+      console.log('Starting frame processing');
+      setDebugInfo('Processing frames...');
+      animationFrameRef.current = requestAnimationFrame(processFrame);
+    }
+
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [referenceImageLoaded, cameraActive, isLoading, processFrame]);
+
+  // Styles
   const styles = {
     container: {
       position: 'fixed',
@@ -434,6 +529,7 @@ const App = () => {
     }
   };
 
+  // Render
   return (
     <div style={styles.container}>
       <video
@@ -463,6 +559,7 @@ const App = () => {
 
       <div style={styles.debugInfo}>
         <div>Status: {debugInfo}</div>
+        <div>Loading: {isLoading ? 'Yes' : 'No'}</div>
         <div>Content Key: {contentKey || 'Not found'}</div>
         <div>Camera: {cameraActive ? 'Active' : 'Inactive'}</div>
         <div>Reference Image: {referenceImageLoaded ? 'Loaded' : 'Loading...'}</div>
@@ -480,6 +577,8 @@ const App = () => {
             src={imageUrl} 
             alt="Target" 
             style={styles.previewImage}
+            onLoad={() => console.log('Preview image loaded')}
+            onError={(e) => console.error('Preview image error:', e)}
           />
         </div>
       )}
