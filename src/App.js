@@ -40,45 +40,60 @@ const ImageMatcher = () => {
   }, []);
 
   // Load marker image with verification
-  const loadMarkerImage = useCallback(async (imageUrl) => {
-    if (!imageUrl) {
-      setError('No image URL provided');
-      return;
-    }
+const loadMarkerImage = useCallback(async (imageUrl) => {
+  if (!imageUrl) {
+    setError('No image URL provided');
+    return;
+  }
 
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    
+    // Set crossOrigin before setting src
+    img.crossOrigin = "anonymous";
+    
+    img.onload = () => {
+      // Create a temporary canvas
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = img.width;
+      tempCanvas.height = img.height;
       
-      img.onload = () => {
-        // Draw the image onto a canvas to ensure it's fully loaded and readable
-        const tempCanvas = document.createElement('canvas');
-        const tempContext = tempCanvas.getContext('2d');
-        tempCanvas.width = img.width;
-        tempCanvas.height = img.height;
+      const tempContext = tempCanvas.getContext('2d');
+      
+      try {
+        // Draw the image to the temporary canvas
         tempContext.drawImage(img, 0, 0);
         
+        // Try to access the image data to verify it's loaded correctly
         try {
-          // Verify we can get image data
           tempContext.getImageData(0, 0, img.width, img.height);
           setReferenceImage(img);
           setIsLoading(false);
           setError(null);
           resolve(img);
-        } catch (error) {
-          setError('Image data not accessible');
-          reject(new Error('Image data not accessible'));
+        } catch (e) {
+          // If we can't access the image data, try with a proxy
+          const proxyUrl = `https://cors-anywhere.herokuapp.com/${imageUrl}`;
+          img.src = proxyUrl;
         }
-      };
-      
-      img.onerror = () => {
-        setError('Failed to load image');
-        reject(new Error('Failed to load image'));
-      };
-      
-      img.src = imageUrl;
-    });
-  }, []);
+      } catch (error) {
+        console.error('Error processing image:', error);
+        setError('Error processing image');
+        reject(error);
+      }
+    };
+    
+    img.onerror = (error) => {
+      console.error('Error loading image:', error);
+      // Try loading with proxy if direct loading fails
+      const proxyUrl = `https://cors-anywhere.herokuapp.com/${imageUrl}`;
+      img.src = proxyUrl;
+    };
+    
+    // Set the source after setting up event handlers
+    img.src = imageUrl;
+  });
+}, []);
 
   // Handle marker selection
   const handleMarkerSelect = useCallback(async (marker) => {
