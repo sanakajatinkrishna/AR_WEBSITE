@@ -26,9 +26,8 @@ const ImageMatcher = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [matchScore, setMatchScore] = useState(null);
+  const [matchScore, setMatchScore] = useState(0);
   const [selectedMarker, setSelectedMarker] = useState(null);
-  const [contentKey, setContentKey] = useState(null);
 
   // Get content key from URL
   const getContentKey = useCallback(() => {
@@ -38,92 +37,78 @@ const ImageMatcher = () => {
 
   // Compare images
   const compareImages = useCallback((capturedImageData, referenceImageData) => {
-    try {
-      const width = capturedImageData.width;
-      const height = capturedImageData.height;
-      const blockSize = 8;
-      let matchCount = 0;
-      let totalBlocks = 0;
+    const width = capturedImageData.width;
+    const height = capturedImageData.height;
+    const blockSize = 8;
+    let matchCount = 0;
+    let totalBlocks = 0;
 
-      for (let y = 0; y < height; y += blockSize) {
-        for (let x = 0; x < width; x += blockSize) {
-          let blockMatchSum = 0;
-          let blockPixels = 0;
+    for (let y = 0; y < height; y += blockSize) {
+      for (let x = 0; x < width; x += blockSize) {
+        let blockMatchSum = 0;
+        let blockPixels = 0;
 
-          for (let by = 0; by < blockSize && y + by < height; by++) {
-            for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-              const i = ((y + by) * width + (x + bx)) * 4;
-              
-              const r1 = capturedImageData.data[i];
-              const g1 = capturedImageData.data[i + 1];
-              const b1 = capturedImageData.data[i + 2];
-              
-              const r2 = referenceImageData.data[i];
-              const g2 = referenceImageData.data[i + 1];
-              const b2 = referenceImageData.data[i + 2];
+        for (let by = 0; by < blockSize && y + by < height; by++) {
+          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+            const i = ((y + by) * width + (x + bx)) * 4;
+            
+            const r1 = capturedImageData.data[i];
+            const g1 = capturedImageData.data[i + 1];
+            const b1 = capturedImageData.data[i + 2];
+            
+            const r2 = referenceImageData.data[i];
+            const g2 = referenceImageData.data[i + 1];
+            const b2 = referenceImageData.data[i + 2];
 
-              const colorDiff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
-              const match = colorDiff < 150 ? 1 : 0;
+            const colorDiff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
+            const match = colorDiff < 150 ? 1 : 0;
 
-              blockMatchSum += match;
-              blockPixels++;
-            }
+            blockMatchSum += match;
+            blockPixels++;
           }
-
-          if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
-            matchCount++;
-          }
-          totalBlocks++;
         }
-      }
 
-      const score = Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
-      return score;
-    } catch (error) {
-      console.error('Error in compareImages:', error);
-      return 0;
+        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
+          matchCount++;
+        }
+        totalBlocks++;
+      }
     }
+
+    return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
   }, []);
 
   // Capture and compare frame
   const captureFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current || !selectedMarker) return;
 
-    try {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      const context = canvas.getContext('2d');
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas.getContext('2d');
 
-      // Set canvas size to match video
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+    // Set canvas size to match video
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
 
-      // Draw and capture video frame
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+    // Draw and capture video frame
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
-      // Create temporary canvas for reference image
-      const tempCanvas = document.createElement('canvas');
-      const tempContext = tempCanvas.getContext('2d');
-      tempCanvas.width = canvas.width;
-      tempCanvas.height = canvas.height;
+    // Create temporary canvas for reference image
+    const tempCanvas = document.createElement('canvas');
+    const tempContext = tempCanvas.getContext('2d');
+    tempCanvas.width = canvas.width;
+    tempCanvas.height = canvas.height;
 
-      // Create and load reference image
-      const referenceImg = new Image();
-      referenceImg.crossOrigin = "anonymous";
-      referenceImg.onload = () => {
-        // Draw reference image to temp canvas
-        tempContext.drawImage(referenceImg, 0, 0, canvas.width, canvas.height);
-        const referenceFrame = tempContext.getImageData(0, 0, canvas.width, canvas.height);
-        
-        // Compare images and update score
-        const score = compareImages(capturedFrame, referenceFrame);
-        setMatchScore(score);
-      };
-      referenceImg.src = selectedMarker.imageUrl;
-    } catch (error) {
-      console.error('Error in captureFrame:', error);
-    }
+    const referenceImg = new Image();
+    referenceImg.crossOrigin = "anonymous";
+    referenceImg.onload = () => {
+      tempContext.drawImage(referenceImg, 0, 0, canvas.width, canvas.height);
+      const referenceFrame = tempContext.getImageData(0, 0, canvas.width, canvas.height);
+      const score = compareImages(capturedFrame, referenceFrame);
+      setMatchScore(score);
+    };
+    referenceImg.src = selectedMarker.imageUrl;
   }, [compareImages, selectedMarker]);
 
   // Start camera
@@ -154,7 +139,6 @@ const ImageMatcher = () => {
       videoRef.current.srcObject.getTracks().forEach(track => track.stop());
       videoRef.current.srcObject = null;
       setIsStreaming(false);
-      setMatchScore(null);
     }
   }, []);
 
@@ -162,8 +146,6 @@ const ImageMatcher = () => {
   useEffect(() => {
     const key = getContentKey();
     if (!key) return;
-
-    setContentKey(key);
     
     const arContentRef = collection(db, 'arContent');
     const markerQuery = query(
@@ -185,11 +167,11 @@ const ImageMatcher = () => {
     return () => unsubscribe();
   }, [getContentKey]);
 
-  // Capture interval
+  // Continuous capture interval
   useEffect(() => {
     let intervalId;
     if (isStreaming && selectedMarker) {
-      intervalId = setInterval(captureFrame, 500);
+      intervalId = setInterval(captureFrame, 100); // Increased frequency for smoother updates
     }
     return () => {
       if (intervalId) {
@@ -209,12 +191,6 @@ const ImageMatcher = () => {
         AR Image Matcher
       </h1>
 
-      {contentKey && (
-        <div style={{ textAlign: 'center', marginBottom: '20px', color: '#666' }}>
-          <p>Content Key: {contentKey}</p>
-        </div>
-      )}
-
       <div style={{
         display: 'grid',
         gridTemplateColumns: '1fr 1fr',
@@ -225,23 +201,40 @@ const ImageMatcher = () => {
           backgroundColor: '#f3f4f6',
           borderRadius: '8px',
           overflow: 'hidden',
-          aspectRatio: '16/9'
+          aspectRatio: '16/9',
+          position: 'relative'
         }}>
-          {selectedMarker && (
+          {selectedMarker?.imageUrl && (
             <img 
               src={selectedMarker.imageUrl}
               alt="Reference"
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              crossOrigin="anonymous"
+              style={{ 
+                width: '100%', 
+                height: '100%', 
+                objectFit: 'contain',
+                position: 'absolute',
+                top: '0',
+                left: '0'
+              }}
             />
           )}
-          <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
+          <p style={{ 
+            textAlign: 'center', 
+            marginTop: '8px', 
+            position: 'absolute',
+            bottom: '0',
+            width: '100%',
+            background: 'rgba(255,255,255,0.8)'
+          }}>
+            Reference Image
+          </p>
         </div>
         <div style={{
           backgroundColor: '#f3f4f6',
           borderRadius: '8px',
           overflow: 'hidden',
-          aspectRatio: '16/9'
+          aspectRatio: '16/9',
+          position: 'relative'
         }}>
           <video
             ref={videoRef}
@@ -253,7 +246,16 @@ const ImageMatcher = () => {
             ref={canvasRef}
             style={{ display: 'none' }}
           />
-          <p style={{ textAlign: 'center', marginTop: '8px' }}>Camera Feed</p>
+          <p style={{ 
+            textAlign: 'center', 
+            marginTop: '8px',
+            position: 'absolute',
+            bottom: '0',
+            width: '100%',
+            background: 'rgba(255,255,255,0.8)'
+          }}>
+            Camera Feed
+          </p>
         </div>
       </div>
 
@@ -275,22 +277,28 @@ const ImageMatcher = () => {
         </button>
       </div>
 
-      {matchScore !== null && (
-        <div style={{
-          padding: '16px',
-          backgroundColor: '#f3f4f6',
-          borderRadius: '8px',
-          textAlign: 'center'
-        }}>
-          <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '8px' }}>
-            Match Score: {matchScore.toFixed(1)}%
-          </h3>
-          <p style={{ color: '#4b5563' }}>
-            {matchScore > 70 ? "It's a match!" : 
-             matchScore > 40 ? "Partial match" : "No match found"}
-          </p>
-        </div>
-      )}
+      <div style={{
+        padding: '16px',
+        backgroundColor: '#f3f4f6',
+        borderRadius: '8px',
+        textAlign: 'center',
+        position: 'fixed',
+        bottom: '20px',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        width: '90%',
+        maxWidth: '400px',
+        boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+        zIndex: 1000
+      }}>
+        <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '8px' }}>
+          Match Score: {matchScore.toFixed(1)}%
+        </h3>
+        <p style={{ color: '#4b5563' }}>
+          {matchScore > 70 ? "It's a match!" : 
+           matchScore > 40 ? "Partial match" : "No match found"}
+        </p>
+      </div>
     </div>
   );
 };
