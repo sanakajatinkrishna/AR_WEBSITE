@@ -1,4 +1,20 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, collection, getDocs } from 'firebase/firestore';
+
+// Initialize Firebase (replace with your config)
+const firebaseConfig = {
+  apiKey: "AIzaSyCTNhBokqTimxo-oGstSA8Zw8jIXO3Nhn4",
+  authDomain: "app-1238f.firebaseapp.com",
+  projectId: "app-1238f",
+  storageBucket: "app-1238f.appspot.com",
+  messagingSenderId: "12576842624",
+  appId: "1:12576842624:web:92eb40fd8c56a9fc475765",
+  measurementId: "G-N5Q9K9G3JN"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
 
 const ImageMatcher = () => {
   const videoRef = useRef(null);
@@ -6,9 +22,42 @@ const ImageMatcher = () => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(null);
   const [error, setError] = useState(null);
+  const [referenceImages, setReferenceImages] = useState([]);
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  // Import reference image
-  const referenceImage = require('./assets/images/reference.jpg');
+  // Fetch reference images from Firestore
+  useEffect(() => {
+    const fetchImages = async () => {
+      try {
+        const querySnapshot = await getDocs(collection(db, 'arContent'));
+        const images = [];
+        
+        for (const doc of querySnapshot.docs) {
+          const data = doc.data();
+          if (data.isActive && data.imageUrl) {
+            images.push({
+              id: doc.id,
+              url: data.imageUrl,
+              contentKey: data.contentKey
+            });
+          }
+        }
+        
+        setReferenceImages(images);
+        if (images.length > 0) {
+          setSelectedImage(images[0]);
+        }
+        setLoading(false);
+      } catch (err) {
+        console.error('Error fetching images:', err);
+        setError('Failed to load reference images');
+        setLoading(false);
+      }
+    };
+
+    fetchImages();
+  }, []);
 
   // Start camera stream
   const startCamera = async () => {
@@ -77,29 +126,26 @@ const ImageMatcher = () => {
   const compareImages = useCallback((imgData1, imgData2) => {
     const width = imgData1.width;
     const height = imgData1.height;
-    const blockSize = 8; // Compare blocks of pixels instead of individual pixels
+    const blockSize = 8;
     const hueWeight = 0.5;
     const satWeight = 0.3;
     const valWeight = 0.2;
-    const hueTolerance = 30; // Degrees
-    const satTolerance = 30; // Percent
-    const valTolerance = 30; // Percent
+    const hueTolerance = 30;
+    const satTolerance = 30;
+    const valTolerance = 30;
     
     let matchCount = 0;
     let totalBlocks = 0;
 
-    // Compare blocks of pixels
     for (let y = 0; y < height; y += blockSize) {
       for (let x = 0; x < width; x += blockSize) {
         let blockMatchSum = 0;
         let blockPixels = 0;
 
-        // Compare pixels within each block
         for (let by = 0; by < blockSize && y + by < height; by++) {
           for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
             const i = ((y + by) * width + (x + bx)) * 4;
             
-            // Get RGB values
             const r1 = imgData1.data[i];
             const g1 = imgData1.data[i + 1];
             const b1 = imgData1.data[i + 2];
@@ -108,16 +154,13 @@ const ImageMatcher = () => {
             const g2 = imgData2.data[i + 1];
             const b2 = imgData2.data[i + 2];
 
-            // Convert to HSV
             const hsv1 = rgbToHsv(r1, g1, b1);
             const hsv2 = rgbToHsv(r2, g2, b2);
 
-            // Compare HSV values with weighted importance
             const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
             const satDiff = Math.abs(hsv1[1] - hsv2[1]);
             const valDiff = Math.abs(hsv1[2] - hsv2[2]);
 
-            // Calculate match score for this pixel
             const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
             const satMatch = satDiff <= satTolerance ? 1 : 0;
             const valMatch = valDiff <= valTolerance ? 1 : 0;
@@ -132,7 +175,6 @@ const ImageMatcher = () => {
           }
         }
 
-        // If block has a good average match, count it
         if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
           matchCount++;
         }
@@ -140,46 +182,37 @@ const ImageMatcher = () => {
       }
     }
 
-    // Calculate final percentage with increased sensitivity
     const rawPercentage = (matchCount / totalBlocks) * 100;
-    
-    // Apply a curve to increase sensitivity in the middle range
     return Math.min(100, rawPercentage * 1.5);
   }, []);
 
   // Capture and compare frame
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current) return;
+    if (!videoRef.current || !canvasRef.current || !selectedImage) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
-    // Set canvas dimensions to match video
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
-    // Draw current video frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    
-    // Get image data from canvas
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
-    // Load reference image
     const refImg = new Image();
-    refImg.src = referenceImage;
+    refImg.crossOrigin = "anonymous";
+    refImg.src = selectedImage.url;
     
     refImg.onload = () => {
-      // Clear canvas and draw reference image
       context.clearRect(0, 0, canvas.width, canvas.height);
       context.drawImage(refImg, 0, 0, canvas.width, canvas.height);
       const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
       
-      // Compare images and update score
       const score = compareImages(capturedFrame, referenceData);
       setMatchScore(score);
     };
-  }, [compareImages, referenceImage]);
+  }, [compareImages, selectedImage]);
 
   // Set up continuous comparison when streaming is active
   useEffect(() => {
@@ -201,6 +234,10 @@ const ImageMatcher = () => {
     };
   }, []);
 
+  if (loading) {
+    return <div>Loading reference images...</div>;
+  }
+
   return (
     <div style={{ maxWidth: '800px', margin: '0 auto', padding: '20px' }}>
       <div style={{ marginBottom: '20px' }}>
@@ -221,6 +258,29 @@ const ImageMatcher = () => {
             {error}
           </div>
         )}
+
+        <div style={{ marginBottom: '20px' }}>
+          <select 
+            value={selectedImage?.id || ''} 
+            onChange={(e) => {
+              const selected = referenceImages.find(img => img.id === e.target.value);
+              setSelectedImage(selected);
+            }}
+            style={{
+              width: '100%',
+              padding: '8px',
+              marginBottom: '10px',
+              borderRadius: '4px',
+              border: '1px solid #ccc'
+            }}
+          >
+            {referenceImages.map(img => (
+              <option key={img.id} value={img.id}>
+                Content Key: {img.contentKey}
+              </option>
+            ))}
+          </select>
+        </div>
         
         <div style={{ 
           display: 'grid', 
@@ -234,11 +294,14 @@ const ImageMatcher = () => {
             borderRadius: '8px',
             overflow: 'hidden'
           }}>
-            <img 
-              src={referenceImage}
-              alt="Reference"
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-            />
+            {selectedImage && (
+              <img 
+                src={selectedImage.url}
+                alt="Reference"
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                crossOrigin="anonymous"
+              />
+            )}
             <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
           </div>
           <div style={{ 
