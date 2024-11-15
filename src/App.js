@@ -254,6 +254,7 @@ const App = () => {
     animationFrameRef.current = requestAnimationFrame(processFrame);
   }, [compareImages, isVideoPlaying, startVideo, referenceImageLoaded, REFERENCE_WIDTH, REFERENCE_HEIGHT, MATCH_THRESHOLD]);
   // Reference image loading
+// Updated loadReferenceImage function that uses the successfully loaded preview image
   const loadReferenceImage = useCallback(async (url) => {
     return new Promise((resolve, reject) => {
       if (!url) {
@@ -264,11 +265,38 @@ const App = () => {
       console.log('Starting reference image load:', url);
       setDebugInfo('Loading reference image...');
 
+      // Get reference to the preview image element
+      const previewImg = document.querySelector('#previewImage');
+      
+      if (previewImg && previewImg.complete && previewImg.naturalWidth !== 0) {
+        // If preview image is already loaded, use it
+        try {
+          const canvas = referenceCanvasRef.current;
+          canvas.width = REFERENCE_WIDTH;
+          canvas.height = REFERENCE_HEIGHT;
+          
+          const ctx = canvas.getContext('2d', { willReadFrequency: true });
+          ctx.drawImage(previewImg, 0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+          
+          // Verify the image data
+          const imageData = ctx.getImageData(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+          if (imageData.data.length > 0) {
+            console.log('Reference image processed from preview');
+            setReferenceImageLoaded(true);
+            setDebugInfo('Reference image ready');
+            resolve(true);
+            return;
+          }
+        } catch (error) {
+          console.error('Error processing preview image:', error);
+        }
+      }
+
+      // If preview image isn't available or failed, load normally
       const img = new Image();
       img.crossOrigin = "anonymous";
       
       img.onload = () => {
-        console.log('Reference image loaded, processing...');
         try {
           const canvas = referenceCanvasRef.current;
           canvas.width = REFERENCE_WIDTH;
@@ -277,20 +305,14 @@ const App = () => {
           const ctx = canvas.getContext('2d', { willReadFrequency: true });
           ctx.drawImage(img, 0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
           
-          // Verify the image data can be accessed
-          try {
-            const imageData = ctx.getImageData(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
-            if (imageData.data.length === 0) {
-              throw new Error('Image data is empty');
-            }
-            console.log('Reference image processed successfully');
-            setReferenceImageLoaded(true);
-            setDebugInfo('Reference image ready');
-            resolve(true);
-          } catch (e) {
-            console.error('Failed to get image data:', e);
-            reject(new Error('Failed to process image data'));
+          const imageData = ctx.getImageData(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+          if (imageData.data.length === 0) {
+            throw new Error('Image data is empty');
           }
+          
+          setReferenceImageLoaded(true);
+          setDebugInfo('Reference image ready');
+          resolve(true);
         } catch (error) {
           console.error('Error processing reference image:', error);
           reject(error);
@@ -303,17 +325,7 @@ const App = () => {
         reject(error);
       };
 
-      const timeoutId = setTimeout(() => {
-        img.src = '';
-        reject(new Error('Image loading timed out'));
-      }, 10000);
-
       img.src = url;
-
-      img.onload = () => {
-        clearTimeout(timeoutId);
-        img.onload();
-      };
     });
   }, [REFERENCE_WIDTH, REFERENCE_HEIGHT]);
 
