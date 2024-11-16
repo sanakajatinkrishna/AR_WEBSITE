@@ -22,6 +22,7 @@ const App = () => {
   const videoRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const canvasRef = useRef(null);
+  const matchCanvasRef = useRef(null);
   const targetImageRef = useRef(null);
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
@@ -29,9 +30,8 @@ const App = () => {
   const [videoUrl, setVideoUrl] = useState(null);
   const [imageUrl, setImageUrl] = useState(null);
   const [isMatched, setIsMatched] = useState(false);
-  const [error, setError] = useState(null);
 
-  // Convert RGB to HSV for better comparison
+  // RGB to HSV conversion helper
   const rgbToHsv = (r, g, b) => {
     r /= 255;
     g /= 255;
@@ -164,30 +164,28 @@ const App = () => {
     }
   }, [videoUrl, isVideoPlaying]);
 
+  // Capture and compare frame
   const processCameraFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !targetImageRef.current) return;
+    if (!videoRef.current || !canvasRef.current || !matchCanvasRef.current) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
-    // Set canvas dimensions to match video
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+    // Set canvas dimensions to match reference image
+    canvas.width = matchCanvasRef.current.width;
+    canvas.height = matchCanvasRef.current.height;
 
     // Draw current video frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     
-    // Get image data from canvas
+    // Get image data from both canvases
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
-
-    // Process target image for comparison
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(targetImageRef.current, 0, 0, canvas.width, canvas.height);
-    const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const referenceFrame = matchCanvasRef.current.getContext('2d')
+      .getImageData(0, 0, canvas.width, canvas.height);
     
-    // Compare images and update status
-    const similarity = compareImages(capturedFrame, referenceData);
+    // Compare images and update score
+    const similarity = compareImages(capturedFrame, referenceFrame);
     setDebugInfo(`Similarity: ${similarity.toFixed(1)}%`);
 
     const SIMILARITY_THRESHOLD = 70;
@@ -200,6 +198,22 @@ const App = () => {
       setIsMatched(false);
     }
   }, [compareImages, isMatched, startVideo]);
+
+  // Process target image when loaded
+  const processTargetImage = useCallback((image) => {
+    if (!matchCanvasRef.current) return;
+    
+    const canvas = matchCanvasRef.current;
+    const ctx = canvas.getContext('2d');
+    
+    // Set a fixed size for processing
+    canvas.width = 640;
+    canvas.height = 480;
+    
+    // Draw and scale the image
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    setDebugInfo('Target image processed');
+  }, []);
 
   // Load content from Firebase
   useEffect(() => {
@@ -231,6 +245,7 @@ const App = () => {
         setVideoUrl(data.videoUrl);
         setImageUrl(data.imageUrl);
         setDebugInfo('Content loaded');
+        
       } catch (error) {
         console.error('Content loading error:', error);
         setDebugInfo(`Error: ${error.message}`);
@@ -244,18 +259,14 @@ const App = () => {
   useEffect(() => {
     if (!imageUrl) return;
 
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      targetImageRef.current = img;
-      setDebugInfo('Target image loaded');
+    const image = new Image();
+    image.crossOrigin = 'anonymous';
+    image.onload = () => {
+      targetImageRef.current = image;
+      processTargetImage(image);
     };
-    img.onerror = () => {
-      setDebugInfo('Error loading target image');
-      setError('Failed to load target image');
-    };
-    img.src = imageUrl;
-  }, [imageUrl]);
+    image.src = imageUrl;
+  }, [imageUrl, processTargetImage]);
 
   // Camera setup with frame processing
   useEffect(() => {
@@ -269,7 +280,8 @@ const App = () => {
           video: {
             facingMode: 'environment',
             width: { ideal: 1280 },
-            height: { ideal: 720 }
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
           }
         });
 
@@ -290,14 +302,13 @@ const App = () => {
           await videoRef.current.play();
           setDebugInfo('Camera ready');
           
-          // Process frames at the same interval as ImageMatcher
+          // Start frame processing
           frameProcessingInterval = setInterval(processCameraFrame, 500);
         }
       } catch (error) {
         console.error('Camera error:', error);
         if (isComponentMounted) {
           setDebugInfo(`Camera error: ${error.message}`);
-          setError('Unable to access camera. Please ensure you have granted camera permissions.');
         }
       }
     };
@@ -344,21 +355,14 @@ const App = () => {
     canvas: {
       display: 'none'
     },
+    matchCanvas: {
+      display: 'none'
+    },
     debugInfo: {
       position: 'absolute',
       top: 20,
       left: 20,
       backgroundColor: 'rgba(0,0,0,0.7)',
-      color: 'white',
-      padding: '10px',
-      borderRadius: '5px',
-      zIndex: 30
-    },
-    error: {
-      position: 'absolute',
-      top: 80,
-      left: 20,
-      backgroundColor: 'rgba(220,38,38,0.9)',
       color: 'white',
       padding: '10px',
       borderRadius: '5px',
@@ -396,6 +400,11 @@ const App = () => {
         style={styles.canvas}
       />
 
+      <canvas
+        ref={matchCanvasRef}
+        style={styles.matchCanvas}
+      />
+
       {videoUrl && (
         <video
           ref={overlayVideoRef}
@@ -415,12 +424,6 @@ const App = () => {
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
         <div>Image Matched: {isMatched ? 'Yes' : 'No'}</div>
       </div>
-
-      {error && (
-        <div style={styles.error}>
-          {error}
-        </div>
-      )}
 
       {imageUrl && (
         <div style={styles.imagePreview}>
