@@ -12,6 +12,7 @@ const firebaseConfig = {
   measurementId: "G-N5Q9K9G3JN"
 };
 
+// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
@@ -41,6 +42,7 @@ const App = () => {
   const [referenceImageLoaded, setReferenceImageLoaded] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [previewLoaded, setPreviewLoaded] = useState(false);
 
   // Color conversion utility
   const rgbToHsv = useCallback((r, g, b) => {
@@ -75,7 +77,8 @@ const App = () => {
     
     return [h, s * 100, v * 100];
   }, []);
-  // Image comparison function
+
+  // Image comparison
   const compareImages = useCallback((currentFrame, referenceCanvas) => {
     try {
       const ctx = referenceCanvas.getContext('2d', { willReadFrequency: true });
@@ -123,7 +126,6 @@ const App = () => {
                 b: referenceFrame.data[i + 2]
               };
 
-              // Edge detection
               if (bx < BLOCK_SIZE - 1 && by < BLOCK_SIZE - 1) {
                 const nextI = ((y + by) * width + (x + bx + 1)) * 4;
                 const bottomI = ((y + by + 1) * width + (x + bx)) * 4;
@@ -180,7 +182,6 @@ const App = () => {
       return 0;
     }
   }, [rgbToHsv]);
-
   // Video playback control
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
@@ -253,8 +254,8 @@ const App = () => {
 
     animationFrameRef.current = requestAnimationFrame(processFrame);
   }, [compareImages, isVideoPlaying, startVideo, referenceImageLoaded, REFERENCE_WIDTH, REFERENCE_HEIGHT, MATCH_THRESHOLD]);
-  // Reference image loading
-// Updated loadReferenceImage function that uses the successfully loaded preview image
+
+  // Reference image loading using preview image
   const loadReferenceImage = useCallback(async (url) => {
     return new Promise((resolve, reject) => {
       if (!url) {
@@ -265,11 +266,9 @@ const App = () => {
       console.log('Starting reference image load:', url);
       setDebugInfo('Loading reference image...');
 
-      // Get reference to the preview image element
+      // Try to use the preview image if it's already loaded
       const previewImg = document.querySelector('#previewImage');
-      
       if (previewImg && previewImg.complete && previewImg.naturalWidth !== 0) {
-        // If preview image is already loaded, use it
         try {
           const canvas = referenceCanvasRef.current;
           canvas.width = REFERENCE_WIDTH;
@@ -278,7 +277,7 @@ const App = () => {
           const ctx = canvas.getContext('2d', { willReadFrequency: true });
           ctx.drawImage(previewImg, 0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
           
-          // Verify the image data
+          // Verify image data
           const imageData = ctx.getImageData(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
           if (imageData.data.length > 0) {
             console.log('Reference image processed from preview');
@@ -292,7 +291,7 @@ const App = () => {
         }
       }
 
-      // If preview image isn't available or failed, load normally
+      // If preview image isn't available or failed, load directly
       const img = new Image();
       img.crossOrigin = "anonymous";
       
@@ -373,6 +372,35 @@ const App = () => {
       throw error;
     }
   }, []);
+  // Preview Image Component
+  const PreviewImage = ({ url, onLoadSuccess }) => {
+    const handlePreviewLoad = useCallback(async () => {
+      console.log('Preview image loaded successfully');
+      setPreviewLoaded(true);
+      
+      try {
+        await loadReferenceImage(url);
+        onLoadSuccess?.();
+      } catch (error) {
+        console.error('Failed to load reference from preview:', error);
+      }
+    }, [url, onLoadSuccess]);
+
+    return (
+      <img 
+        id="previewImage"
+        src={url} 
+        alt="Target" 
+        style={{
+          ...styles.previewImage,
+          opacity: previewLoaded ? 1 : 0.5,
+        }}
+        onLoad={handlePreviewLoad}
+        onError={(e) => console.error('Preview image error:', e)}
+        crossOrigin="anonymous"
+      />
+    );
+  };
 
   // Content loading effect
   useEffect(() => {
@@ -407,21 +435,13 @@ const App = () => {
         
         if (!mounted) return;
 
+        if (!data.videoUrl || !data.imageUrl) {
+          throw new Error('Missing video or image URL in content');
+        }
+
         setVideoUrl(data.videoUrl);
         setImageUrl(data.imageUrl);
-
-        try {
-          await loadReferenceImage(data.imageUrl);
-          
-          if (!mounted) return;
-
-          if (referenceImageLoaded) {
-currentStream = await initCamera();
-          }
-        } catch (error) {
-          console.error('Failed to load reference image:', error);
-          setDebugInfo(`Image error: ${error.message}`);
-        }
+        setDebugInfo('Content loaded, waiting for image...');
 
       } catch (error) {
         console.error('Initialization error:', error);
@@ -446,7 +466,34 @@ currentStream = await initCamera();
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [contentKey, loadReferenceImage, initCamera, referenceImageLoaded]);
+  }, [contentKey]);
+
+  // Camera initialization effect
+  useEffect(() => {
+    let mounted = true;
+
+    const startCamera = async () => {
+      if (referenceImageLoaded && !cameraActive) {
+        try {
+          await initCamera();
+          if (mounted) {
+            setDebugInfo('Camera active - Ready to scan');
+          }
+        } catch (error) {
+          console.error('Camera initialization failed:', error);
+          if (mounted) {
+            setDebugInfo(`Camera error: ${error.message}`);
+          }
+        }
+      }
+    };
+
+    startCamera();
+
+    return () => {
+      mounted = false;
+    };
+  }, [referenceImageLoaded, cameraActive, initCamera]);
 
   // Frame processing effect
   useEffect(() => {
@@ -577,6 +624,7 @@ currentStream = await initCamera();
         <div>Reference Image: {referenceImageLoaded ? 'Loaded' : 'Loading...'}</div>
         <div>Match Score: {matchScore.toFixed(1)}%</div>
         <div>Video State: {isVideoPlaying ? 'Playing' : 'Waiting'}</div>
+        <div>Preview Image: {previewLoaded ? 'Loaded' : 'Loading...'}</div>
       </div>
 
       <div style={styles.matchIndicator}>
@@ -585,12 +633,9 @@ currentStream = await initCamera();
 
       {imageUrl && (
         <div style={styles.imagePreview}>
-          <img 
-            src={imageUrl} 
-            alt="Target" 
-            style={styles.previewImage}
-            onLoad={() => console.log('Preview image loaded')}
-            onError={(e) => console.error('Preview image error:', e)}
+          <PreviewImage 
+            url={imageUrl} 
+            onLoadSuccess={() => console.log('Preview and reference image setup complete')}
           />
         </div>
       )}
