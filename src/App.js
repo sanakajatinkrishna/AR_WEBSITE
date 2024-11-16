@@ -165,39 +165,78 @@ const App = () => {
   }, [videoUrl, isVideoPlaying]);
 
   // Capture and compare frame
-  const processCameraFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !matchCanvasRef.current) return;
+const processCameraFrame = useCallback(() => {
+  if (!videoRef.current || !canvasRef.current || !matchCanvasRef.current || !targetImageRef.current) return;
 
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
+  const video = videoRef.current;
+  const canvas = canvasRef.current;
+  const matchCanvas = matchCanvasRef.current;
+  const context = canvas.getContext('2d');
+  const matchContext = matchCanvas.getContext('2d');
 
-    // Set canvas dimensions to match reference image
-    canvas.width = matchCanvasRef.current.width;
-    canvas.height = matchCanvasRef.current.height;
+  // Set both canvases to same dimensions
+  const width = 640;  // Fixed width for consistency
+  const height = 480; // Fixed height for consistency
+  
+  canvas.width = width;
+  canvas.height = height;
+  matchCanvas.width = width;
+  matchCanvas.height = height;
 
-    // Draw current video frame
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  // Clear both canvases first
+  context.clearRect(0, 0, width, height);
+  matchContext.clearRect(0, 0, width, height);
+
+  // Draw current video frame
+  context.drawImage(video, 0, 0, width, height);
+  
+  // Draw reference image
+  matchContext.drawImage(targetImageRef.current, 0, 0, width, height);
+  
+  // Get image data from both canvases
+  const capturedFrame = context.getImageData(0, 0, width, height);
+  const referenceFrame = matchContext.getImageData(0, 0, width, height);
+
+  // Add basic brightness check
+  const avgBrightness = calculateAverageBrightness(capturedFrame);
+  if (avgBrightness < 20) { // Threshold for "too dark"
+    setDebugInfo('Scene too dark - please improve lighting');
+    setIsMatched(false);
+    return;
+  }
+  
+  // Compare images and update score
+  const similarity = compareImages(capturedFrame, referenceFrame);
+  setDebugInfo(`Similarity: ${similarity.toFixed(1)}% - Brightness: ${avgBrightness.toFixed(1)}%`);
+
+  const SIMILARITY_THRESHOLD = 70;
+  const matched = similarity > SIMILARITY_THRESHOLD;
+  
+  if (matched && !isMatched) {
+    setIsMatched(true);
+    startVideo();
+  } else if (!matched && isMatched) {
+    setIsMatched(false);
+  }
+}, [compareImages, isMatched, startVideo]);
+
+// Add this helper function to check scene brightness
+const calculateAverageBrightness = (imageData) => {
+  let total = 0;
+  const data = imageData.data;
+  
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
     
-    // Get image data from both canvases
-    const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
-    const referenceFrame = matchCanvasRef.current.getContext('2d')
-      .getImageData(0, 0, canvas.width, canvas.height);
-    
-    // Compare images and update score
-    const similarity = compareImages(capturedFrame, referenceFrame);
-    setDebugInfo(`Similarity: ${similarity.toFixed(1)}%`);
-
-    const SIMILARITY_THRESHOLD = 70;
-    const matched = similarity > SIMILARITY_THRESHOLD;
-    
-    if (matched && !isMatched) {
-      setIsMatched(true);
-      startVideo();
-    } else if (!matched && isMatched) {
-      setIsMatched(false);
-    }
-  }, [compareImages, isMatched, startVideo]);
+    // Calculate luminance
+    const brightness = (0.299 * r + 0.587 * g + 0.114 * b);
+    total += brightness;
+  }
+  
+  return (total / (imageData.width * imageData.height)) / 2.55; // Convert to percentage
+};
 
   // Process target image when loaded
   const processTargetImage = useCallback((image) => {
