@@ -164,23 +164,6 @@ const App = () => {
     }
   }, [videoUrl, isVideoPlaying]);
 
-  // Process target image when loaded
-  const processTargetImage = useCallback((image) => {
-    if (!matchCanvasRef.current) return;
-    
-    const canvas = matchCanvasRef.current;
-    const ctx = canvas.getContext('2d');
-    
-    // Set canvas dimensions to match video aspect ratio
-    const aspectRatio = 16/9;
-    canvas.width = 640;  // Base width
-    canvas.height = canvas.width / aspectRatio;
-    
-    // Draw and scale the image to match canvas dimensions
-    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-    setDebugInfo('Target image processed');
-  }, []);
-
   // Capture and compare frame
   const processCameraFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current || !matchCanvasRef.current) return;
@@ -215,6 +198,22 @@ const App = () => {
       setIsMatched(false);
     }
   }, [compareImages, isMatched, startVideo]);
+
+  // Process target image when loaded
+  const processTargetImage = useCallback((image) => {
+    if (!matchCanvasRef.current) return;
+    
+    const canvas = matchCanvasRef.current;
+    const ctx = canvas.getContext('2d');
+    
+    // Set a fixed size for processing
+    canvas.width = 640;
+    canvas.height = 480;
+    
+    // Draw and scale the image
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    setDebugInfo('Target image processed');
+  }, []);
 
   // Load content from Firebase
   useEffect(() => {
