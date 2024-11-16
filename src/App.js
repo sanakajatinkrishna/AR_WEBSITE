@@ -31,58 +31,128 @@ const App = () => {
   const [imageUrl, setImageUrl] = useState(null);
   const [isMatched, setIsMatched] = useState(false);
 
-  const compareImages = useCallback((cameraCanvas, targetCanvas, threshold = 30) => {
+  // Function to convert RGB to HSV for better comparison
+  const rgbToHsv = (r, g, b) => {
+    r /= 255;
+    g /= 255;
+    b /= 255;
+
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const diff = max - min;
+
+    let h = 0;
+    let s = max === 0 ? 0 : diff / max;
+    let v = max;
+
+    if (diff !== 0) {
+      switch (max) {
+        case r:
+          h = 60 * ((g - b) / diff + (g < b ? 6 : 0));
+          break;
+        case g:
+          h = 60 * ((b - r) / diff + 2);
+          break;
+        case b:
+          h = 60 * ((r - g) / diff + 4);
+          break;
+        default:
+          break;
+      }
+    }
+
+    return [h, s * 100, v * 100];
+  };
+
+  const compareImages = useCallback((cameraCanvas, targetCanvas) => {
     const cameraCtx = cameraCanvas.getContext('2d');
     const targetCtx = targetCanvas.getContext('2d');
     
-    // Get target image data
-    const targetData = targetCtx.getImageData(0, 0, targetCanvas.width, targetCanvas.height).data;
+    const blockSize = 8; // Compare blocks of pixels instead of individual pixels
+    const hueWeight = 0.5;
+    const satWeight = 0.3;
+    const valWeight = 0.2;
+    const hueTolerance = 30; // Degrees
+    const satTolerance = 30; // Percent
+    const valTolerance = 30; // Percent
     
-    // We'll scan the camera feed in sections the size of the target image
-    const scanSize = 50; // How many pixels to move per scan
-    let bestMatch = 0;
+    let bestMatchScore = 0;
 
-    for (let y = 0; y <= cameraCanvas.height - targetCanvas.height; y += scanSize) {
-      for (let x = 0; x <= cameraCanvas.width - targetCanvas.width; x += scanSize) {
-        // Get the current section of the camera feed
-        const cameraData = cameraCtx.getImageData(x, y, targetCanvas.width, targetCanvas.height).data;
-        
+    // Scan through the camera feed in sections
+    const scanSize = 50; // How many pixels to move per scan
+    
+    for (let scanY = 0; scanY <= cameraCanvas.height - targetCanvas.height; scanY += scanSize) {
+      for (let scanX = 0; scanX <= cameraCanvas.width - targetCanvas.width; scanX += scanSize) {
         let matchCount = 0;
-        let totalChecks = 0;
-        
-        // Sample pixels at intervals
-        const sampleInterval = 8; // Check every 8th pixel
-        
-        for (let i = 0; i < targetData.length; i += (4 * sampleInterval)) {
-          const r1 = targetData[i];
-          const g1 = targetData[i + 1];
-          const b1 = targetData[i + 2];
-          
-          const r2 = cameraData[i];
-          const g2 = cameraData[i + 1];
-          const b2 = cameraData[i + 2];
-          
-          // Calculate color difference
-          const colorDiff = Math.sqrt(
-            Math.pow(r1 - r2, 2) +
-            Math.pow(g1 - g2, 2) +
-            Math.pow(b1 - b2, 2)
-          );
-          
-          if (colorDiff < threshold) {
-            matchCount++;
+        let totalBlocks = 0;
+
+        // Get the current section of camera feed
+        const cameraSection = cameraCtx.getImageData(scanX, scanY, targetCanvas.width, targetCanvas.height);
+        const targetSection = targetCtx.getImageData(0, 0, targetCanvas.width, targetCanvas.height);
+
+        // Compare blocks of pixels within this section
+        for (let y = 0; y < targetCanvas.height; y += blockSize) {
+          for (let x = 0; x < targetCanvas.width; x += blockSize) {
+            let blockMatchSum = 0;
+            let blockPixels = 0;
+
+            // Compare pixels within each block
+            for (let by = 0; by < blockSize && y + by < targetCanvas.height; by++) {
+              for (let bx = 0; bx < blockSize && x + bx < targetCanvas.width; bx++) {
+                const i = ((y + by) * targetCanvas.width + (x + bx)) * 4;
+                
+                // Get RGB values for camera image
+                const r1 = cameraSection.data[i];
+                const g1 = cameraSection.data[i + 1];
+                const b1 = cameraSection.data[i + 2];
+                
+                // Get RGB values for target image
+                const r2 = targetSection.data[i];
+                const g2 = targetSection.data[i + 1];
+                const b2 = targetSection.data[i + 2];
+
+                // Convert both to HSV
+                const hsv1 = rgbToHsv(r1, g1, b1);
+                const hsv2 = rgbToHsv(r2, g2, b2);
+
+                // Compare HSV values with weighted importance
+                const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
+                const satDiff = Math.abs(hsv1[1] - hsv2[1]);
+                const valDiff = Math.abs(hsv1[2] - hsv2[2]);
+
+                // Calculate match score for this pixel
+                const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
+                const satMatch = satDiff <= satTolerance ? 1 : 0;
+                const valMatch = valDiff <= valTolerance ? 1 : 0;
+
+                const pixelMatchScore = 
+                  hueMatch * hueWeight +
+                  satMatch * satWeight +
+                  valMatch * valWeight;
+
+                blockMatchSum += pixelMatchScore;
+                blockPixels++;
+              }
+            }
+
+            // If block has a good average match, count it
+            if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
+              matchCount++;
+            }
+            totalBlocks++;
           }
-          totalChecks++;
         }
-        
-        const similarity = (matchCount / totalChecks) * 100;
-        if (similarity > bestMatch) {
-          bestMatch = similarity;
+
+        // Calculate score for this section
+        const sectionScore = (matchCount / totalBlocks) * 100;
+        if (sectionScore > bestMatchScore) {
+          bestMatchScore = sectionScore;
         }
       }
     }
     
-    return bestMatch;
+    // Apply a curve to increase sensitivity in the middle range
+    return Math.min(100, bestMatchScore * 1.5);
   }, []);
 
   const processTargetImage = useCallback((image) => {
@@ -91,8 +161,8 @@ const App = () => {
     const canvas = matchCanvasRef.current;
     const ctx = canvas.getContext('2d');
     
-    // Set a fixed size for processing the target image
-    const MAX_SIZE = 200;
+    // Set a reasonable size for processing
+    const MAX_SIZE = 300;
     let width = image.naturalWidth;
     let height = image.naturalHeight;
     
@@ -113,23 +183,8 @@ const App = () => {
     canvas.width = width;
     canvas.height = height;
     
-    // Draw and normalize the image
+    // Draw the image
     ctx.drawImage(image, 0, 0, width, height);
-    
-    // Apply some preprocessing to help with matching
-    const imageData = ctx.getImageData(0, 0, width, height);
-    const data = imageData.data;
-    
-    // Basic image normalization
-    for (let i = 0; i < data.length; i += 4) {
-      // Convert to grayscale and normalize contrast
-      const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      data[i] = avg;     // R
-      data[i + 1] = avg; // G
-      data[i + 2] = avg; // B
-    }
-    
-    ctx.putImageData(imageData, 0, 0);
     setDebugInfo('Target image processed');
   }, []);
 
@@ -182,7 +237,7 @@ const App = () => {
     const similarity = compareImages(canvasRef.current, matchCanvasRef.current);
     setDebugInfo(`Similarity: ${similarity.toFixed(1)}%`);
 
-    const SIMILARITY_THRESHOLD = 25; // Lower threshold since we're scanning portions
+    const SIMILARITY_THRESHOLD = 40; // Adjusted threshold for the new matching algorithm
     const matched = similarity > SIMILARITY_THRESHOLD;
     
     if (matched && !isMatched) {
@@ -193,6 +248,7 @@ const App = () => {
     }
   }, [compareImages, isMatched, startVideo]);
 
+  // Load content from Firebase
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -232,6 +288,7 @@ const App = () => {
     loadContent();
   }, [contentKey]);
 
+  // Handle target image loading
   useEffect(() => {
     if (!imageUrl) return;
 
@@ -244,6 +301,7 @@ const App = () => {
     image.src = imageUrl;
   }, [imageUrl, processTargetImage]);
 
+  // Camera setup with frame processing
   useEffect(() => {
     let isComponentMounted = true;
     let currentStream = null;
@@ -384,7 +442,6 @@ const App = () => {
         <video
           ref={overlayVideoRef}
           style={styles.overlayVideo}
-          autoPlay
           playsInline
           loop
           muted={false}
