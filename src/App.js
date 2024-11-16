@@ -23,6 +23,7 @@ const App = () => {
   const overlayVideoRef = useRef(null);
   const canvasRef = useRef(null);
   const matchCanvasRef = useRef(null);
+  const targetImageRef = useRef(null);
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
@@ -30,6 +31,7 @@ const App = () => {
   const [imageUrl, setImageUrl] = useState(null);
   const [isMatched, setIsMatched] = useState(false);
 
+  // RGB to HSV conversion helper
   const rgbToHsv = (r, g, b) => {
     r /= 255;
     g /= 255;
@@ -45,109 +47,93 @@ const App = () => {
 
     if (diff !== 0) {
       switch (max) {
-        case r: h = ((g - b) / diff) % 6; break;
-        case g: h = (b - r) / diff + 2; break;
-        case b: h = (r - g) / diff + 4; break;
-        default: h = 0 ; break;
+        case r:
+          h = 60 * ((g - b) / diff + (g < b ? 6 : 0));
+          break;
+        case g:
+          h = 60 * ((b - r) / diff + 2);
+          break;
+        case b:
+          h = 60 * ((r - g) / diff + 4);
+          break;
+        default:
+          break;
       }
     }
 
-    h = Math.round(h * 60);
-    if (h < 0) h += 360;
-
-    return [h, Math.round(s * 100), Math.round(v * 100)];
+    return [h, s * 100, v * 100];
   };
 
-  const compareImages = useCallback((cameraData, targetData) => {
-    const width = targetData.width;
-    const height = targetData.height;
-    const blockSize = 8;
+  // Compare images using HSV color space and regional comparison
+  const compareImages = useCallback((imgData1, imgData2) => {
+    const width = imgData1.width;
+    const height = imgData1.height;
+    const blockSize = 8; // Compare blocks of pixels instead of individual pixels
     const hueWeight = 0.5;
     const satWeight = 0.3;
     const valWeight = 0.2;
-    const hueTolerance = 30;
-    const satTolerance = 30;
-    const valTolerance = 30;
+    const hueTolerance = 30; // Degrees
+    const satTolerance = 30; // Percent
+    const valTolerance = 30; // Percent
+    
+    let matchCount = 0;
+    let totalBlocks = 0;
 
-    let bestMatchScore = 0;
+    // Compare blocks of pixels
+    for (let y = 0; y < height; y += blockSize) {
+      for (let x = 0; x < width; x += blockSize) {
+        let blockMatchSum = 0;
+        let blockPixels = 0;
 
-    // Scan through the camera frame to find the target image
-    const stepSize = Math.max(1, Math.floor(blockSize / 2)); // Overlap scanning for better matching
+        // Compare pixels within each block
+        for (let by = 0; by < blockSize && y + by < height; by++) {
+          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+            const i = ((y + by) * width + (x + bx)) * 4;
+            
+            // Get RGB values
+            const r1 = imgData1.data[i];
+            const g1 = imgData1.data[i + 1];
+            const b1 = imgData1.data[i + 2];
+            
+            const r2 = imgData2.data[i];
+            const g2 = imgData2.data[i + 1];
+            const b2 = imgData2.data[i + 2];
 
-    for (let offsetY = 0; offsetY <= cameraData.height - height; offsetY += stepSize) {
-      for (let offsetX = 0; offsetX <= cameraData.width - width; offsetX += stepSize) {
-        let matchCount = 0;
-        let totalBlocks = 0;
+            // Convert to HSV
+            const hsv1 = rgbToHsv(r1, g1, b1);
+            const hsv2 = rgbToHsv(r2, g2, b2);
 
-        // Compare blocks of pixels
-        for (let y = 0; y < height; y += blockSize) {
-          for (let x = 0; x < width; x += blockSize) {
-            let blockMatchSum = 0;
-            let blockPixels = 0;
+            // Compare HSV values with weighted importance
+            const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
+            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
+            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
 
-            // Sample pixels within block
-            for (let by = 0; by < blockSize && y + by < height; by++) {
-              for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-                const targetI = ((y + by) * width + (x + bx)) * 4;
-                const cameraI = (((offsetY + y + by) * cameraData.width) + (offsetX + x + bx)) * 4;
+            // Calculate match score for this pixel
+            const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
+            const satMatch = satDiff <= satTolerance ? 1 : 0;
+            const valMatch = valDiff <= valTolerance ? 1 : 0;
 
-                if (cameraI < cameraData.data.length - 4 && targetI < targetData.data.length - 4) {
-                  // Get RGB values
-                  const rt = targetData.data[targetI];
-                  const gt = targetData.data[targetI + 1];
-                  const bt = targetData.data[targetI + 2];
+            const pixelMatchScore = 
+              hueMatch * hueWeight +
+              satMatch * satWeight +
+              valMatch * valWeight;
 
-                  const rc = cameraData.data[cameraI];
-                  const gc = cameraData.data[cameraI + 1];
-                  const bc = cameraData.data[cameraI + 2];
-
-                  // Convert to HSV
-                  const hsvTarget = rgbToHsv(rt, gt, bt);
-                  const hsvCamera = rgbToHsv(rc, gc, bc);
-
-                  // Compare HSV values
-                  const hueDiff = Math.min(
-                    Math.abs(hsvTarget[0] - hsvCamera[0]),
-                    360 - Math.abs(hsvTarget[0] - hsvCamera[0])
-                  );
-                  const satDiff = Math.abs(hsvTarget[1] - hsvCamera[1]);
-                  const valDiff = Math.abs(hsvTarget[2] - hsvCamera[2]);
-
-                  // Calculate weighted match score
-                  const hueMatch = hueDiff < hueTolerance ? 1 : 0;
-                  const satMatch = satDiff < satTolerance ? 1 : 0;
-                  const valMatch = valDiff < valTolerance ? 1 : 0;
-
-                  const pixelScore = (hueMatch * hueWeight + 
-                                    satMatch * satWeight + 
-                                    valMatch * valWeight);
-                  
-                  blockMatchSum += pixelScore;
-                  blockPixels++;
-                }
-              }
-            }
-
-            // Calculate block match score
-            if (blockPixels > 0) {
-              const blockScore = blockMatchSum / blockPixels;
-              if (blockScore > 0.6) {
-                matchCount++;
-              }
-              totalBlocks++;
-            }
+            blockMatchSum += pixelMatchScore;
+            blockPixels++;
           }
         }
 
-        // Calculate match percentage for this position
-        if (totalBlocks > 0) {
-          const score = (matchCount / totalBlocks) * 100;
-          bestMatchScore = Math.max(bestMatchScore, score);
+        // If block has a good average match, count it
+        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
+          matchCount++;
         }
+        totalBlocks++;
       }
     }
 
-    return bestMatchScore;
+    // Calculate final percentage with increased sensitivity
+    const rawPercentage = (matchCount / totalBlocks) * 100;
+    return Math.min(100, rawPercentage * 1.5);
   }, []);
 
   const startVideo = useCallback(async () => {
@@ -178,31 +164,33 @@ const App = () => {
     }
   }, [videoUrl, isVideoPlaying]);
 
+  // Capture and compare frame
   const processCameraFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current || !matchCanvasRef.current) return;
 
-    const cameraCanvas = canvasRef.current;
-    const cameraCtx = cameraCanvas.getContext('2d');
     const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas.getContext('2d');
 
-    // Set camera canvas size
-    cameraCanvas.width = video.videoWidth;
-    cameraCanvas.height = video.videoHeight;
-    cameraCtx.drawImage(video, 0, 0);
+    // Set canvas dimensions to match reference image
+    canvas.width = matchCanvasRef.current.width;
+    canvas.height = matchCanvasRef.current.height;
 
+    // Draw current video frame
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    
     // Get image data from both canvases
-    const cameraData = cameraCtx.getImageData(0, 0, cameraCanvas.width, cameraCanvas.height);
-    const targetData = matchCanvasRef.current.getContext('2d')
-      .getImageData(0, 0, matchCanvasRef.current.width, matchCanvasRef.current.height);
-
-    // Compare images
-    const similarity = compareImages(cameraData, targetData);
+    const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+    const referenceFrame = matchCanvasRef.current.getContext('2d')
+      .getImageData(0, 0, canvas.width, canvas.height);
+    
+    // Compare images and update score
+    const similarity = compareImages(capturedFrame, referenceFrame);
     setDebugInfo(`Similarity: ${similarity.toFixed(1)}%`);
 
-    // Threshold for matching
-    const SIMILARITY_THRESHOLD = 40; // Adjust this value based on testing
+    const SIMILARITY_THRESHOLD = 70;
     const matched = similarity > SIMILARITY_THRESHOLD;
-
+    
     if (matched && !isMatched) {
       setIsMatched(true);
       startVideo();
@@ -211,47 +199,21 @@ const App = () => {
     }
   }, [compareImages, isMatched, startVideo]);
 
-  // Load image into match canvas when URL is set
-  useEffect(() => {
-    if (!imageUrl || !matchCanvasRef.current) return;
-
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      const canvas = matchCanvasRef.current;
-      const ctx = canvas.getContext('2d');
-      
-      // Set a reasonable size for the target image
-      const MAX_WIDTH = 300;
-      const MAX_HEIGHT = 300;
-      
-      let width = img.width;
-      let height = img.height;
-      
-      if (width > height) {
-        if (width > MAX_WIDTH) {
-          height *= MAX_WIDTH / width;
-          width = MAX_WIDTH;
-        }
-      } else {
-        if (height > MAX_HEIGHT) {
-          width *= MAX_HEIGHT / height;
-          height = MAX_HEIGHT;
-        }
-      }
-      
-      canvas.width = width;
-      canvas.height = height;
-      ctx.drawImage(img, 0, 0, width, height);
-      setDebugInfo('Target image loaded');
-    };
+  // Process target image when loaded
+  const processTargetImage = useCallback((image) => {
+    if (!matchCanvasRef.current) return;
     
-    img.onerror = () => {
-      setDebugInfo('Error loading target image');
-    };
+    const canvas = matchCanvasRef.current;
+    const ctx = canvas.getContext('2d');
     
-    img.src = imageUrl;
-  }, [imageUrl]);
+    // Set a fixed size for processing
+    canvas.width = 640;
+    canvas.height = 480;
+    
+    // Draw and scale the image
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    setDebugInfo('Target image processed');
+  }, []);
 
   // Load content from Firebase
   useEffect(() => {
@@ -283,6 +245,7 @@ const App = () => {
         setVideoUrl(data.videoUrl);
         setImageUrl(data.imageUrl);
         setDebugInfo('Content loaded');
+        
       } catch (error) {
         console.error('Content loading error:', error);
         setDebugInfo(`Error: ${error.message}`);
@@ -292,7 +255,20 @@ const App = () => {
     loadContent();
   }, [contentKey]);
 
-  // Set up camera and frame processing
+  // Handle target image loading
+  useEffect(() => {
+    if (!imageUrl) return;
+
+    const image = new Image();
+    image.crossOrigin = 'anonymous';
+    image.onload = () => {
+      targetImageRef.current = image;
+      processTargetImage(image);
+    };
+    image.src = imageUrl;
+  }, [imageUrl, processTargetImage]);
+
+  // Camera setup with frame processing
   useEffect(() => {
     let isComponentMounted = true;
     let currentStream = null;
@@ -304,7 +280,8 @@ const App = () => {
           video: {
             facingMode: 'environment',
             width: { ideal: 1280 },
-            height: { ideal: 720 }
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
           }
         });
 
@@ -325,7 +302,8 @@ const App = () => {
           await videoRef.current.play();
           setDebugInfo('Camera ready');
           
-          frameProcessingInterval = setInterval(processCameraFrame, 200);
+          // Start frame processing
+          frameProcessingInterval = setInterval(processCameraFrame, 500);
         }
       } catch (error) {
         console.error('Camera error:', error);
