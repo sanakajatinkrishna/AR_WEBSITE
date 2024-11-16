@@ -12,7 +12,6 @@ const firebaseConfig = {
   measurementId: "G-N5Q9K9G3JN"
 };
 
-// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
@@ -78,7 +77,7 @@ const App = () => {
     return [h, s * 100, v * 100];
   }, []);
 
-  // Image comparison
+  // Image comparison function
   const compareImages = useCallback((currentFrame, referenceCanvas) => {
     try {
       const ctx = referenceCanvas.getContext('2d', { willReadFrequency: true });
@@ -255,78 +254,78 @@ const App = () => {
     animationFrameRef.current = requestAnimationFrame(processFrame);
   }, [compareImages, isVideoPlaying, startVideo, referenceImageLoaded, REFERENCE_WIDTH, REFERENCE_HEIGHT, MATCH_THRESHOLD]);
 
-  // Reference image loading using preview image
-  const loadReferenceImage = useCallback(async (url) => {
-    return new Promise((resolve, reject) => {
-      if (!url) {
-        reject(new Error('No URL provided'));
-        return;
-      }
-
-      console.log('Starting reference image load:', url);
-      setDebugInfo('Loading reference image...');
-
-      // Try to use the preview image if it's already loaded
-      const previewImg = document.querySelector('#previewImage');
-      if (previewImg && previewImg.complete && previewImg.naturalWidth !== 0) {
-        try {
-          const canvas = referenceCanvasRef.current;
-          canvas.width = REFERENCE_WIDTH;
-          canvas.height = REFERENCE_HEIGHT;
-          
-          const ctx = canvas.getContext('2d', { willReadFrequency: true });
-          ctx.drawImage(previewImg, 0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
-          
-          // Verify image data
-          const imageData = ctx.getImageData(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
-          if (imageData.data.length > 0) {
-            console.log('Reference image processed from preview');
-            setReferenceImageLoaded(true);
-            setDebugInfo('Reference image ready');
-            resolve(true);
-            return;
-          }
-        } catch (error) {
-          console.error('Error processing preview image:', error);
+  // PreviewImage component with reference image handling
+  const PreviewImage = ({ url }) => {
+    const loadReferenceFromPreview = useCallback(async (previewElement) => {
+      try {
+        console.log('Setting up reference image from preview');
+        const canvas = referenceCanvasRef.current;
+        canvas.width = REFERENCE_WIDTH;
+        canvas.height = REFERENCE_HEIGHT;
+        
+        const ctx = canvas.getContext('2d', { willReadFrequency: true });
+        if (!ctx) {
+          throw new Error('Could not get canvas context');
         }
-      }
 
-      // If preview image isn't available or failed, load directly
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      
-      img.onload = () => {
-        try {
-          const canvas = referenceCanvasRef.current;
-          canvas.width = REFERENCE_WIDTH;
-          canvas.height = REFERENCE_HEIGHT;
-          
-          const ctx = canvas.getContext('2d', { willReadFrequency: true });
-          ctx.drawImage(img, 0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
-          
-          const imageData = ctx.getImageData(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
-          if (imageData.data.length === 0) {
-            throw new Error('Image data is empty');
-          }
-          
-          setReferenceImageLoaded(true);
-          setDebugInfo('Reference image ready');
-          resolve(true);
-        } catch (error) {
-          console.error('Error processing reference image:', error);
-          reject(error);
+        // Draw the preview image to the reference canvas
+        ctx.drawImage(previewElement, 0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+        
+        // Verify we can access the image data
+        const imageData = ctx.getImageData(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+        if (!imageData || imageData.data.length === 0) {
+          throw new Error('Could not access image data');
         }
-      };
-      
-      img.onerror = (error) => {
-        console.error('Failed to load reference image:', error);
-        setDebugInfo('Failed to load reference image');
-        reject(error);
-      };
 
-      img.src = url;
-    });
-  }, [REFERENCE_WIDTH, REFERENCE_HEIGHT]);
+        return true;
+      } catch (error) {
+        console.error('Error setting up reference image:', error);
+        throw error;
+      }
+    }, []);
+
+    const handlePreviewLoad = useCallback(async (event) => {
+      console.log('Preview image loaded successfully');
+      setDebugInfo('Preview loaded, setting up reference...');
+      
+      try {
+        const previewElement = event.target;
+        await loadReferenceFromPreview(previewElement);
+        
+        console.log('Reference image setup complete');
+        setPreviewLoaded(true);
+        setReferenceImageLoaded(true);
+        setDebugInfo('Image processing complete - Ready');
+      } catch (error) {
+        console.error('Error in preview load handler:', error);
+        setDebugInfo(`Image setup error: ${error.message}`);
+        setPreviewLoaded(false);
+        setReferenceImageLoaded(false);
+      }
+    }, [loadReferenceFromPreview]);
+
+    const handlePreviewError = useCallback((error) => {
+      console.error('Preview image error:', error);
+      setDebugInfo('Failed to load preview image');
+      setPreviewLoaded(false);
+      setReferenceImageLoaded(false);
+    }, []);
+
+    return (
+      <img 
+        id="previewImage"
+        src={url} 
+        alt="Target" 
+        style={{
+          ...styles.previewImage,
+          opacity: previewLoaded ? 1 : 0.5,
+        }}
+        onLoad={handlePreviewLoad}
+        onError={handlePreviewError}
+        crossOrigin="anonymous"
+      />
+    );
+  };
 
   // Camera initialization
   const initCamera = useCallback(async () => {
@@ -372,36 +371,6 @@ const App = () => {
       throw error;
     }
   }, []);
-  // Preview Image Component
-  const PreviewImage = ({ url, onLoadSuccess }) => {
-    const handlePreviewLoad = useCallback(async () => {
-      console.log('Preview image loaded successfully');
-      setPreviewLoaded(true);
-      
-      try {
-        await loadReferenceImage(url);
-        onLoadSuccess?.();
-      } catch (error) {
-        console.error('Failed to load reference from preview:', error);
-      }
-    }, [url, onLoadSuccess]);
-
-    return (
-      <img 
-        id="previewImage"
-        src={url} 
-        alt="Target" 
-        style={{
-          ...styles.previewImage,
-          opacity: previewLoaded ? 1 : 0.5,
-        }}
-        onLoad={handlePreviewLoad}
-        onError={(e) => console.error('Preview image error:', e)}
-        crossOrigin="anonymous"
-      />
-    );
-  };
-
   // Content loading effect
   useEffect(() => {
     let mounted = true;
@@ -416,6 +385,16 @@ const App = () => {
       try {
         setIsLoading(true);
         setDebugInfo('Loading content...');
+        setReferenceImageLoaded(false);
+        setPreviewLoaded(false);
+
+        // Reset any existing references
+        if (referenceCanvasRef.current) {
+          const ctx = referenceCanvasRef.current.getContext('2d');
+          if (ctx) {
+            ctx.clearRect(0, 0, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+          }
+        }
 
         const arContentRef = collection(db, 'arContent');
         const q = query(
@@ -439,9 +418,28 @@ const App = () => {
           throw new Error('Missing video or image URL in content');
         }
 
+        // Pre-validate image URL
+        try {
+          const response = await fetch(data.imageUrl, { method: 'HEAD' });
+          if (!response.ok) {
+            throw new Error(`Image URL returned status ${response.status}`);
+          }
+          
+          // Check if the response is an image
+          const contentType = response.headers.get('content-type');
+          if (!contentType || !contentType.startsWith('image/')) {
+            throw new Error('URL does not point to an image');
+          }
+        } catch (error) {
+          console.error('Image URL validation failed:', error);
+          setDebugInfo('Invalid image URL');
+          return;
+        }
+
+        console.log('Setting content URLs:', { video: data.videoUrl, image: data.imageUrl });
         setVideoUrl(data.videoUrl);
         setImageUrl(data.imageUrl);
-        setDebugInfo('Content loaded, waiting for image...');
+        setDebugInfo('Loading image...');
 
       } catch (error) {
         console.error('Initialization error:', error);
@@ -466,7 +464,7 @@ const App = () => {
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [contentKey]);
+  }, [contentKey, REFERENCE_WIDTH, REFERENCE_HEIGHT]);
 
   // Camera initialization effect
   useEffect(() => {
@@ -477,7 +475,7 @@ const App = () => {
         try {
           await initCamera();
           if (mounted) {
-            setDebugInfo('Camera active - Ready to scan');
+            setDebugInfo('Camera ready - Scan target image');
           }
         } catch (error) {
           console.error('Camera initialization failed:', error);
@@ -620,11 +618,12 @@ const App = () => {
         <div>Status: {debugInfo}</div>
         <div>Loading: {isLoading ? 'Yes' : 'No'}</div>
         <div>Content Key: {contentKey || 'Not found'}</div>
+        <div>Image URL: {imageUrl ? 'Set' : 'Not set'}</div>
+        <div>Preview Loaded: {previewLoaded ? 'Yes' : 'No'}</div>
+        <div>Reference Ready: {referenceImageLoaded ? 'Yes' : 'No'}</div>
         <div>Camera: {cameraActive ? 'Active' : 'Inactive'}</div>
-        <div>Reference Image: {referenceImageLoaded ? 'Loaded' : 'Loading...'}</div>
         <div>Match Score: {matchScore.toFixed(1)}%</div>
         <div>Video State: {isVideoPlaying ? 'Playing' : 'Waiting'}</div>
-        <div>Preview Image: {previewLoaded ? 'Loaded' : 'Loading...'}</div>
       </div>
 
       <div style={styles.matchIndicator}>
@@ -633,10 +632,7 @@ const App = () => {
 
       {imageUrl && (
         <div style={styles.imagePreview}>
-          <PreviewImage 
-            url={imageUrl} 
-            onLoadSuccess={() => console.log('Preview and reference image setup complete')}
-          />
+          <PreviewImage url={imageUrl} />
         </div>
       )}
     </div>
