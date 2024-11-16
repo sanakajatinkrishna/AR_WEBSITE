@@ -31,55 +31,105 @@ const App = () => {
   const [imageUrl, setImageUrl] = useState(null);
   const [isMatched, setIsMatched] = useState(false);
 
-  // Custom image matching function
-  const compareImages = useCallback((canvas1, canvas2, threshold = 20, sampleSize = 32) => {
-    const ctx1 = canvas1.getContext('2d');
-    const ctx2 = canvas2.getContext('2d');
+  const compareImages = useCallback((cameraCanvas, targetCanvas, threshold = 30) => {
+    const cameraCtx = cameraCanvas.getContext('2d');
+    const targetCtx = targetCanvas.getContext('2d');
     
-    // Get image data from both canvases
-    const img1 = ctx1.getImageData(0, 0, canvas1.width, canvas1.height);
-    const img2 = ctx2.getImageData(0, 0, canvas2.width, canvas2.height);
+    // Get target image data
+    const targetData = targetCtx.getImageData(0, 0, targetCanvas.width, targetCanvas.height).data;
     
-    const data1 = img1.data;
-    const data2 = img2.data;
+    // We'll scan the camera feed in sections the size of the target image
+    const scanSize = 50; // How many pixels to move per scan
+    let bestMatch = 0;
 
-    let matchCount = 0;
-    let totalChecks = 0;
-
-    // Compare pixels at regular intervals (sampling)
-    for (let y = 0; y < canvas1.height; y += sampleSize) {
-      for (let x = 0; x < canvas1.width; x += sampleSize) {
-        const i = (y * canvas1.width + x) * 4;
+    for (let y = 0; y <= cameraCanvas.height - targetCanvas.height; y += scanSize) {
+      for (let x = 0; x <= cameraCanvas.width - targetCanvas.width; x += scanSize) {
+        // Get the current section of the camera feed
+        const cameraData = cameraCtx.getImageData(x, y, targetCanvas.width, targetCanvas.height).data;
         
-        // Compare RGB values with threshold
-        const diffR = Math.abs(data1[i] - data2[i]);
-        const diffG = Math.abs(data1[i + 1] - data2[i + 1]);
-        const diffB = Math.abs(data1[i + 2] - data2[i + 2]);
+        let matchCount = 0;
+        let totalChecks = 0;
         
-        if (diffR < threshold && diffG < threshold && diffB < threshold) {
-          matchCount++;
+        // Sample pixels at intervals
+        const sampleInterval = 8; // Check every 8th pixel
+        
+        for (let i = 0; i < targetData.length; i += (4 * sampleInterval)) {
+          const r1 = targetData[i];
+          const g1 = targetData[i + 1];
+          const b1 = targetData[i + 2];
+          
+          const r2 = cameraData[i];
+          const g2 = cameraData[i + 1];
+          const b2 = cameraData[i + 2];
+          
+          // Calculate color difference
+          const colorDiff = Math.sqrt(
+            Math.pow(r1 - r2, 2) +
+            Math.pow(g1 - g2, 2) +
+            Math.pow(b1 - b2, 2)
+          );
+          
+          if (colorDiff < threshold) {
+            matchCount++;
+          }
+          totalChecks++;
         }
-        totalChecks++;
+        
+        const similarity = (matchCount / totalChecks) * 100;
+        if (similarity > bestMatch) {
+          bestMatch = similarity;
+        }
       }
     }
-
-    const similarity = (matchCount / totalChecks) * 100;
-    return similarity;
+    
+    return bestMatch;
   }, []);
 
-  // Process target image when loaded
   const processTargetImage = useCallback((image) => {
     if (!matchCanvasRef.current) return;
     
     const canvas = matchCanvasRef.current;
     const ctx = canvas.getContext('2d');
     
-    // Set canvas size to match image dimensions
-    canvas.width = image.naturalWidth;
-    canvas.height = image.naturalHeight;
+    // Set a fixed size for processing the target image
+    const MAX_SIZE = 200;
+    let width = image.naturalWidth;
+    let height = image.naturalHeight;
     
-    // Draw image to canvas
-    ctx.drawImage(image, 0, 0);
+    // Scale down the image if it's too large
+    if (width > height) {
+      if (width > MAX_SIZE) {
+        height = height * (MAX_SIZE / width);
+        width = MAX_SIZE;
+      }
+    } else {
+      if (height > MAX_SIZE) {
+        width = width * (MAX_SIZE / height);
+        height = MAX_SIZE;
+      }
+    }
+    
+    // Set canvas size to scaled dimensions
+    canvas.width = width;
+    canvas.height = height;
+    
+    // Draw and normalize the image
+    ctx.drawImage(image, 0, 0, width, height);
+    
+    // Apply some preprocessing to help with matching
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    
+    // Basic image normalization
+    for (let i = 0; i < data.length; i += 4) {
+      // Convert to grayscale and normalize contrast
+      const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      data[i] = avg;     // R
+      data[i + 1] = avg; // G
+      data[i + 2] = avg; // B
+    }
+    
+    ctx.putImageData(imageData, 0, 0);
     setDebugInfo('Target image processed');
   }, []);
 
@@ -111,13 +161,19 @@ const App = () => {
     }
   }, [videoUrl, isVideoPlaying]);
 
-  // Process camera frame and compare with target image
   const processCameraFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current || !matchCanvasRef.current || !targetImageRef.current) return;
 
     const context = canvasRef.current.getContext('2d');
-    canvasRef.current.width = videoRef.current.videoWidth;
-    canvasRef.current.height = videoRef.current.videoHeight;
+    
+    // Set canvas dimensions to match video
+    const videoWidth = videoRef.current.videoWidth;
+    const videoHeight = videoRef.current.videoHeight;
+    
+    if (canvasRef.current.width !== videoWidth || canvasRef.current.height !== videoHeight) {
+      canvasRef.current.width = videoWidth;
+      canvasRef.current.height = videoHeight;
+    }
     
     // Draw current frame to canvas
     context.drawImage(videoRef.current, 0, 0);
@@ -126,7 +182,7 @@ const App = () => {
     const similarity = compareImages(canvasRef.current, matchCanvasRef.current);
     setDebugInfo(`Similarity: ${similarity.toFixed(1)}%`);
 
-    const SIMILARITY_THRESHOLD = 60; // Adjust this value based on testing
+    const SIMILARITY_THRESHOLD = 25; // Lower threshold since we're scanning portions
     const matched = similarity > SIMILARITY_THRESHOLD;
     
     if (matched && !isMatched) {
@@ -137,7 +193,6 @@ const App = () => {
     }
   }, [compareImages, isMatched, startVideo]);
 
-  // Load content from Firebase
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -177,7 +232,6 @@ const App = () => {
     loadContent();
   }, [contentKey]);
 
-  // Handle target image loading
   useEffect(() => {
     if (!imageUrl) return;
 
@@ -190,7 +244,6 @@ const App = () => {
     image.src = imageUrl;
   }, [imageUrl, processTargetImage]);
 
-  // Camera setup with frame processing
   useEffect(() => {
     let isComponentMounted = true;
     let currentStream = null;
