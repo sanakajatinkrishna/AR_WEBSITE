@@ -32,7 +32,7 @@ const App = () => {
   const [isMatched, setIsMatched] = useState(false);
 
   // RGB to HSV conversion helper
-  const rgbToHsv = (r, g, b) => {
+  const rgbToHsv = useCallback((r, g, b) => {
     r /= 255;
     g /= 255;
     b /= 255;
@@ -62,106 +62,101 @@ const App = () => {
     }
 
     return [h, s * 100, v * 100];
-  };
+  }, []);
 
-  // Compare images using HSV color space and regional comparison
-const compareImages = useCallback((imgData1, imgData2) => {
-  const width = imgData1.width;
-  const height = imgData1.height;
-  const blockSize = 8;
-  const hueWeight = 0.5;
-  const satWeight = 0.3;
-  const valWeight = 0.2;
-  const hueTolerance = 30;
-  const satTolerance = 30;
-  const valTolerance = 30;
-  
-  // Add minimum brightness threshold
-  const MIN_BRIGHTNESS = 30; // Out of 100
-  const MIN_SATURATION = 10; // Out of 100
-  
-  let matchCount = 0;
-  let totalBlocks = 0;
-  let validBlockCount = 0;
+  const compareImages = useCallback((imgData1, imgData2) => {
+    const width = imgData1.width;
+    const height = imgData1.height;
+    const blockSize = 16;
+    
+    const hueWeight = 0.4;
+    const satWeight = 0.3;
+    const valWeight = 0.3;
+    
+    const hueTolerance = 25;
+    const satTolerance = 25;
+    const valTolerance = 25;
+    
+    const MIN_BRIGHTNESS = 15;
+    const MIN_SATURATION = 5;
+    const BLOCK_MATCH_THRESHOLD = 0.5;
+    
+    let matchCount = 0;
+    let totalBlocks = 0;
+    let validBlockCount = 0;
 
-  // Compare blocks of pixels
-  for (let y = 0; y < height; y += blockSize) {
-    for (let x = 0; x < width; x += blockSize) {
-      let blockMatchSum = 0;
-      let blockPixels = 0;
-      let blockBrightnessSum = 0;
-      let blockSaturationSum = 0;
+    const getBlockAverageHSV = (imgData, startX, startY) => {
+      let hSum = 0, sSum = 0, vSum = 0;
+      let pixelCount = 0;
 
-      // Compare pixels within each block
-      for (let by = 0; by < blockSize && y + by < height; by++) {
-        for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-          const i = ((y + by) * width + (x + bx)) * 4;
+      for (let y = 0; y < blockSize && startY + y < height; y++) {
+        for (let x = 0; x < blockSize && startX + x < width; x++) {
+          const i = ((startY + y) * width + (startX + x)) * 4;
+          const r = imgData.data[i];
+          const g = imgData.data[i + 1];
+          const b = imgData.data[i + 2];
           
-          // Get RGB values for both images
-          const r1 = imgData1.data[i];
-          const g1 = imgData1.data[i + 1];
-          const b1 = imgData1.data[i + 2];
-          
-          const r2 = imgData2.data[i];
-          const g2 = imgData2.data[i + 1];
-          const b2 = imgData2.data[i + 2];
-
-          // Convert to HSV
-          const hsv1 = rgbToHsv(r1, g1, b1);
-          const hsv2 = rgbToHsv(r2, g2, b2);
-
-          // Accumulate brightness and saturation for the reference image
-          blockBrightnessSum += hsv2[2]; // V component
-          blockSaturationSum += hsv2[1]; // S component
-
-          // Compare HSV values with weighted importance
-          const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
-          const satDiff = Math.abs(hsv1[1] - hsv2[1]);
-          const valDiff = Math.abs(hsv1[2] - hsv2[2]);
-
-          // Calculate match score for this pixel
-          const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
-          const satMatch = satDiff <= satTolerance ? 1 : 0;
-          const valMatch = valDiff <= valTolerance ? 1 : 0;
-
-          const pixelMatchScore = 
-            hueMatch * hueWeight +
-            satMatch * satWeight +
-            valMatch * valWeight;
-
-          blockMatchSum += pixelMatchScore;
-          blockPixels++;
+          const [h, s, v] = rgbToHsv(r, g, b);
+          hSum += h;
+          sSum += s;
+          vSum += v;
+          pixelCount++;
         }
       }
 
-      // Calculate average brightness and saturation for this block
-      const avgBlockBrightness = blockBrightnessSum / (blockSize * blockSize);
-      const avgBlockSaturation = blockSaturationSum / (blockSize * blockSize);
+      return pixelCount > 0 ? [
+        hSum / pixelCount,
+        sSum / pixelCount,
+        vSum / pixelCount
+      ] : [0, 0, 0];
+    };
 
-      // Only count block if it has sufficient detail (brightness and saturation)
-      if (avgBlockBrightness >= MIN_BRIGHTNESS && avgBlockSaturation >= MIN_SATURATION) {
+    for (let y = 0; y < height; y += blockSize) {
+      for (let x = 0; x < width; x += blockSize) {
+        const hsv1 = getBlockAverageHSV(imgData1, x, y);
+        const hsv2 = getBlockAverageHSV(imgData2, x, y);
+
+        if (hsv2[2] < MIN_BRIGHTNESS || hsv2[1] < MIN_SATURATION) {
+          continue;
+        }
+
         validBlockCount++;
+
+        let hueDiff = Math.abs(hsv1[0] - hsv2[0]);
+        if (hueDiff > 180) {
+          hueDiff = 360 - hueDiff;
+        }
         
-        // If block has a good average match, count it
-        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
+        const satDiff = Math.abs(hsv1[1] - hsv2[1]);
+        const valDiff = Math.abs(hsv1[2] - hsv2[2]);
+
+        const hueMatch = Math.max(0, 1 - (hueDiff / hueTolerance));
+        const satMatch = Math.max(0, 1 - (satDiff / satTolerance));
+        const valMatch = Math.max(0, 1 - (valDiff / valTolerance));
+
+        const blockMatchScore = 
+          hueMatch * hueWeight +
+          satMatch * satWeight +
+          valMatch * valWeight;
+
+        if (blockMatchScore > BLOCK_MATCH_THRESHOLD) {
           matchCount++;
         }
+
+        totalBlocks++;
       }
-      
-      totalBlocks++;
     }
-  }
 
-  // Require minimum number of valid blocks for a valid match
-  const MIN_VALID_BLOCKS_RATIO = 0.3; // At least 30% of blocks should be valid
-  if (validBlockCount < totalBlocks * MIN_VALID_BLOCKS_RATIO) {
-    return 0; // Return 0% match if not enough valid blocks
-  }
+    const MIN_VALID_BLOCKS = Math.floor(totalBlocks * 0.15);
+    if (validBlockCount < MIN_VALID_BLOCKS) {
+      return 0;
+    }
 
-  // Calculate final percentage based on valid blocks only
-  const rawPercentage = (matchCount / validBlockCount) * 100;
-  return Math.min(100, rawPercentage * 1.5);
-}, []);
+    const matchPercentage = (matchCount / validBlockCount) * 100;
+    const scaledPercentage = Math.min(100, matchPercentage * 1.2);
+    
+    return Math.round(scaledPercentage);
+  }, [rgbToHsv]);
 
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
@@ -191,7 +186,6 @@ const compareImages = useCallback((imgData1, imgData2) => {
     }
   }, [videoUrl, isVideoPlaying]);
 
-  // Capture and compare frame
   const processCameraFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current || !matchCanvasRef.current) return;
 
@@ -199,50 +193,43 @@ const compareImages = useCallback((imgData1, imgData2) => {
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
-    // Set canvas dimensions to match reference image
     canvas.width = matchCanvasRef.current.width;
     canvas.height = matchCanvasRef.current.height;
 
-    // Draw current video frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     
-    // Get image data from both canvases
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
     const referenceFrame = matchCanvasRef.current.getContext('2d')
       .getImageData(0, 0, canvas.width, canvas.height);
     
-    // Compare images and update score
     const similarity = compareImages(capturedFrame, referenceFrame);
+    
+    const MATCH_THRESHOLD = 65;
+    const UNMATCH_THRESHOLD = 60;
+    
     setDebugInfo(`Similarity: ${similarity.toFixed(1)}%`);
 
-    const SIMILARITY_THRESHOLD = 70;
-    const matched = similarity > SIMILARITY_THRESHOLD;
-    
-    if (matched && !isMatched) {
+    if (similarity > MATCH_THRESHOLD && !isMatched) {
       setIsMatched(true);
       startVideo();
-    } else if (!matched && isMatched) {
+    } else if (similarity < UNMATCH_THRESHOLD && isMatched) {
       setIsMatched(false);
     }
   }, [compareImages, isMatched, startVideo]);
 
-  // Process target image when loaded
   const processTargetImage = useCallback((image) => {
     if (!matchCanvasRef.current) return;
     
     const canvas = matchCanvasRef.current;
     const ctx = canvas.getContext('2d');
     
-    // Set a fixed size for processing
     canvas.width = 640;
     canvas.height = 480;
     
-    // Draw and scale the image
     ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
     setDebugInfo('Target image processed');
   }, []);
 
-  // Load content from Firebase
   useEffect(() => {
     const loadContent = async () => {
       if (!contentKey) {
@@ -282,7 +269,6 @@ const compareImages = useCallback((imgData1, imgData2) => {
     loadContent();
   }, [contentKey]);
 
-  // Handle target image loading
   useEffect(() => {
     if (!imageUrl) return;
 
@@ -295,7 +281,6 @@ const compareImages = useCallback((imgData1, imgData2) => {
     image.src = imageUrl;
   }, [imageUrl, processTargetImage]);
 
-  // Camera setup with frame processing
   useEffect(() => {
     let isComponentMounted = true;
     let currentStream = null;
@@ -329,7 +314,6 @@ const compareImages = useCallback((imgData1, imgData2) => {
           await videoRef.current.play();
           setDebugInfo('Camera ready');
           
-          // Start frame processing
           frameProcessingInterval = setInterval(processCameraFrame, 500);
         }
       } catch (error) {
