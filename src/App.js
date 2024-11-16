@@ -1,8 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore';
-import * as tf from '@tensorflow/tfjs';
-import * as mobilenet from '@tensorflow-models/mobilenet';
 
 // Firebase Configuration
 const firebaseConfig = {
@@ -20,42 +18,69 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const App = () => {
-  // Get content key directly from URL
   const contentKey = new URLSearchParams(window.location.search).get('key');
-
   const videoRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const canvasRef = useRef(null);
-  const modelRef = useRef(null);
+  const matchCanvasRef = useRef(null);
+  const targetImageRef = useRef(null);
 
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
   const [imageUrl, setImageUrl] = useState(null);
   const [isMatched, setIsMatched] = useState(false);
-  const [targetImageFeatures, setTargetImageFeatures] = useState(null);
 
-  // Memoize extractImageFeatures function
-  const extractImageFeatures = useCallback(async (imgElement) => {
-    if (!modelRef.current) return null;
+  // Custom image matching function
+  const compareImages = useCallback((canvas1, canvas2, threshold = 20, sampleSize = 32) => {
+    const ctx1 = canvas1.getContext('2d');
+    const ctx2 = canvas2.getContext('2d');
     
-    const tfImg = tf.browser.fromPixels(imgElement);
-    const features = await modelRef.current.infer(tfImg, true);
-    const featureArray = await features.data();
-    tfImg.dispose();
-    features.dispose();
-    return featureArray;
+    // Get image data from both canvases
+    const img1 = ctx1.getImageData(0, 0, canvas1.width, canvas1.height);
+    const img2 = ctx2.getImageData(0, 0, canvas2.width, canvas2.height);
+    
+    const data1 = img1.data;
+    const data2 = img2.data;
+
+    let matchCount = 0;
+    let totalChecks = 0;
+
+    // Compare pixels at regular intervals (sampling)
+    for (let y = 0; y < canvas1.height; y += sampleSize) {
+      for (let x = 0; x < canvas1.width; x += sampleSize) {
+        const i = (y * canvas1.width + x) * 4;
+        
+        // Compare RGB values with threshold
+        const diffR = Math.abs(data1[i] - data2[i]);
+        const diffG = Math.abs(data1[i + 1] - data2[i + 1]);
+        const diffB = Math.abs(data1[i + 2] - data2[i + 2]);
+        
+        if (diffR < threshold && diffG < threshold && diffB < threshold) {
+          matchCount++;
+        }
+        totalChecks++;
+      }
+    }
+
+    const similarity = (matchCount / totalChecks) * 100;
+    return similarity;
   }, []);
 
-  // Memoize calculateSimilarity function
-  const calculateSimilarity = useCallback((features1, features2) => {
-    if (!features1 || !features2) return 0;
+  // Process target image when loaded
+  const processTargetImage = useCallback((image) => {
+    if (!matchCanvasRef.current) return;
     
-    const dotProduct = features1.reduce((sum, val, i) => sum + val * features2[i], 0);
-    const magnitude1 = Math.sqrt(features1.reduce((sum, val) => sum + val * val, 0));
-    const magnitude2 = Math.sqrt(features2.reduce((sum, val) => sum + val * val, 0));
+    const canvas = matchCanvasRef.current;
+    const ctx = canvas.getContext('2d');
     
-    return dotProduct / (magnitude1 * magnitude2);
+    // Set canvas size to match image dimensions
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    
+    // Draw image to canvas
+    ctx.drawImage(image, 0, 0);
+    setDebugInfo('Target image processed');
   }, []);
 
   const startVideo = useCallback(async () => {
@@ -86,37 +111,22 @@ const App = () => {
     }
   }, [videoUrl, isVideoPlaying]);
 
-  // Memoize processTargetImage function
-  const processTargetImage = useCallback(async (imageUrl) => {
-    try {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = reject;
-        img.src = imageUrl;
-      });
-
-      const features = await extractImageFeatures(img);
-      setTargetImageFeatures(features);
-      setDebugInfo('Target image processed');
-    } catch (error) {
-      console.error('Target image processing error:', error);
-      setDebugInfo(`Target image error: ${error.message}`);
-    }
-  }, [extractImageFeatures]);
-
-  // Memoize processCameraFrame function
-  const processCameraFrame = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current || !targetImageFeatures || !modelRef.current) return;
+  // Process camera frame and compare with target image
+  const processCameraFrame = useCallback(() => {
+    if (!videoRef.current || !canvasRef.current || !matchCanvasRef.current || !targetImageRef.current) return;
 
     const context = canvasRef.current.getContext('2d');
-    context.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
+    canvasRef.current.width = videoRef.current.videoWidth;
+    canvasRef.current.height = videoRef.current.videoHeight;
     
-    const features = await extractImageFeatures(canvasRef.current);
-    const similarity = calculateSimilarity(features, targetImageFeatures);
+    // Draw current frame to canvas
+    context.drawImage(videoRef.current, 0, 0);
     
-    const SIMILARITY_THRESHOLD = 0.85;
+    // Compare images
+    const similarity = compareImages(canvasRef.current, matchCanvasRef.current);
+    setDebugInfo(`Similarity: ${similarity.toFixed(1)}%`);
+
+    const SIMILARITY_THRESHOLD = 60; // Adjust this value based on testing
     const matched = similarity > SIMILARITY_THRESHOLD;
     
     if (matched && !isMatched) {
@@ -125,26 +135,7 @@ const App = () => {
     } else if (!matched && isMatched) {
       setIsMatched(false);
     }
-
-    setDebugInfo(`Similarity: ${(similarity * 100).toFixed(1)}%`);
-  }, [targetImageFeatures, extractImageFeatures, calculateSimilarity, isMatched, startVideo]);
-
-  // Initialize TensorFlow model
-  useEffect(() => {
-    const loadModel = async () => {
-      try {
-        setDebugInfo('Loading ML model...');
-        await tf.ready();
-        modelRef.current = await mobilenet.load();
-        setDebugInfo('ML model loaded');
-      } catch (error) {
-        console.error('Model loading error:', error);
-        setDebugInfo(`Model error: ${error.message}`);
-      }
-    };
-
-    loadModel();
-  }, []);
+  }, [compareImages, isMatched, startVideo]);
 
   // Load content from Firebase
   useEffect(() => {
@@ -155,9 +146,7 @@ const App = () => {
       }
 
       try {
-        console.log('Loading content for key:', contentKey);
         setDebugInfo('Verifying content...');
-
         const arContentRef = collection(db, 'arContent');
         const q = query(
           arContentRef,
@@ -168,20 +157,17 @@ const App = () => {
         const snapshot = await getDocs(q);
         
         if (snapshot.empty) {
-          console.log('No content found');
           setDebugInfo('Invalid or inactive content');
           return;
         }
 
         const doc = snapshot.docs[0];
         const data = doc.data();
-        console.log('Content found:', data);
-
+        
         setVideoUrl(data.videoUrl);
         setImageUrl(data.imageUrl);
-        await processTargetImage(data.imageUrl);
         setDebugInfo('Content loaded');
-
+        
       } catch (error) {
         console.error('Content loading error:', error);
         setDebugInfo(`Error: ${error.message}`);
@@ -189,7 +175,20 @@ const App = () => {
     };
 
     loadContent();
-  }, [contentKey, processTargetImage]);
+  }, [contentKey]);
+
+  // Handle target image loading
+  useEffect(() => {
+    if (!imageUrl) return;
+
+    const image = new Image();
+    image.crossOrigin = 'anonymous';
+    image.onload = () => {
+      targetImageRef.current = image;
+      processTargetImage(image);
+    };
+    image.src = imageUrl;
+  }, [imageUrl, processTargetImage]);
 
   // Camera setup with frame processing
   useEffect(() => {
@@ -223,7 +222,6 @@ const App = () => {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-          console.log('Camera started');
           setDebugInfo('Camera ready');
           
           // Start frame processing
@@ -238,7 +236,6 @@ const App = () => {
     };
 
     if (videoUrl) {
-      console.log('Starting camera');
       startCamera();
     }
 
@@ -280,6 +277,9 @@ const App = () => {
     canvas: {
       display: 'none'  // Hidden canvas for processing
     },
+    matchCanvas: {
+      display: 'none'  // Hidden canvas for target image
+    },
     debugInfo: {
       position: 'absolute',
       top: 20,
@@ -319,9 +319,12 @@ const App = () => {
 
       <canvas
         ref={canvasRef}
-        width={1280}
-        height={720}
         style={styles.canvas}
+      />
+
+      <canvas
+        ref={matchCanvasRef}
+        style={styles.matchCanvas}
       />
 
       {videoUrl && (
