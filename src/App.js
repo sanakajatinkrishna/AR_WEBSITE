@@ -65,76 +65,129 @@ const App = () => {
   };
 
   // Compare images using HSV color space and regional comparison
-  const compareImages = useCallback((imgData1, imgData2) => {
-    const width = imgData1.width;
-    const height = imgData1.height;
-    const blockSize = 8; // Compare blocks of pixels instead of individual pixels
-    const hueWeight = 0.5;
-    const satWeight = 0.3;
-    const valWeight = 0.2;
-    const hueTolerance = 30; // Degrees
-    const satTolerance = 30; // Percent
-    const valTolerance = 30; // Percent
+const compareImages = useCallback((imgData1, imgData2) => {
+  const width = imgData1.width;
+  const height = imgData1.height;
+  const blockSize = 8;
+  const hueWeight = 0.5;
+  const satWeight = 0.3;
+  const valWeight = 0.2;
+  const hueTolerance = 30;
+  const satTolerance = 30;
+  const valTolerance = 30;
+  
+  // Add light level detection
+  const checkLightLevel = (imgData) => {
+    let totalBrightness = 0;
+    let pixelCount = 0;
     
-    let matchCount = 0;
-    let totalBlocks = 0;
-
-    // Compare blocks of pixels
-    for (let y = 0; y < height; y += blockSize) {
-      for (let x = 0; x < width; x += blockSize) {
-        let blockMatchSum = 0;
-        let blockPixels = 0;
-
-        // Compare pixels within each block
-        for (let by = 0; by < blockSize && y + by < height; by++) {
-          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-            const i = ((y + by) * width + (x + bx)) * 4;
-            
-            // Get RGB values
-            const r1 = imgData1.data[i];
-            const g1 = imgData1.data[i + 1];
-            const b1 = imgData1.data[i + 2];
-            
-            const r2 = imgData2.data[i];
-            const g2 = imgData2.data[i + 1];
-            const b2 = imgData2.data[i + 2];
-
-            // Convert to HSV
-            const hsv1 = rgbToHsv(r1, g1, b1);
-            const hsv2 = rgbToHsv(r2, g2, b2);
-
-            // Compare HSV values with weighted importance
-            const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
-            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
-            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
-
-            // Calculate match score for this pixel
-            const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
-            const satMatch = satDiff <= satTolerance ? 1 : 0;
-            const valMatch = valDiff <= valTolerance ? 1 : 0;
-
-            const pixelMatchScore = 
-              hueMatch * hueWeight +
-              satMatch * satWeight +
-              valMatch * valWeight;
-
-            blockMatchSum += pixelMatchScore;
-            blockPixels++;
-          }
-        }
-
-        // If block has a good average match, count it
-        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
-          matchCount++;
-        }
-        totalBlocks++;
-      }
+    // Sample every 4th pixel for performance
+    for (let i = 0; i < imgData.data.length; i += 16) {
+      const r = imgData.data[i];
+      const g = imgData.data[i + 1];
+      const b = imgData.data[i + 2];
+      
+      // Calculate perceived brightness using relative luminance formula
+      const brightness = (0.299 * r + 0.587 * g + 0.114 * b);
+      totalBrightness += brightness;
+      pixelCount++;
     }
+    
+    const averageBrightness = totalBrightness / pixelCount;
+    return averageBrightness;
+  };
 
-    // Calculate final percentage with increased sensitivity
-    const rawPercentage = (matchCount / totalBlocks) * 100;
-    return Math.min(100, rawPercentage * 1.5);
-  }, []);
+  // Check if either image is too dark
+  const brightness1 = checkLightLevel(imgData1);
+  const brightness2 = checkLightLevel(imgData2);
+  
+  const MIN_BRIGHTNESS = 30; // Minimum average brightness threshold
+  const MAX_BRIGHTNESS_DIFF = 50; // Maximum allowed brightness difference
+  
+  if (brightness1 < MIN_BRIGHTNESS || brightness2 < MIN_BRIGHTNESS) {
+    return 0; // Too dark, no match
+  }
+  
+  if (Math.abs(brightness1 - brightness2) > MAX_BRIGHTNESS_DIFF) {
+    return 0; // Too different in brightness, no match
+  }
+  
+  let matchCount = 0;
+  let totalBlocks = 0;
+  
+  // Enhanced block comparison with edge detection
+  for (let y = 0; y < height; y += blockSize) {
+    for (let x = 0; x < width; x += blockSize) {
+      let blockMatchSum = 0;
+      let blockPixels = 0;
+      let hasEdge = false;
+      
+      // Check for edges in the block
+      for (let by = 0; by < blockSize && y + by < height; by++) {
+        for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+          const i = ((y + by) * width + (x + bx)) * 4;
+          
+          // Get RGB values
+          const r1 = imgData1.data[i];
+          const g1 = imgData1.data[i + 1];
+          const b1 = imgData1.data[i + 2];
+          
+          const r2 = imgData2.data[i];
+          const g2 = imgData2.data[i + 1];
+          const b2 = imgData2.data[i + 2];
+          
+          // Simple edge detection using intensity difference with neighbors
+          if (bx > 0 && by > 0) {
+            const prevI = ((y + by - 1) * width + (x + bx - 1)) * 4;
+            const intensity1 = (r1 + g1 + b1) / 3;
+            const prevIntensity1 = (imgData1.data[prevI] + imgData1.data[prevI + 1] + imgData1.data[prevI + 2]) / 3;
+            if (Math.abs(intensity1 - prevIntensity1) > 30) {
+              hasEdge = true;
+            }
+          }
+
+          // Convert to HSV
+          const hsv1 = rgbToHsv(r1, g1, b1);
+          const hsv2 = rgbToHsv(r2, g2, b2);
+
+          // Enhanced HSV comparison with stricter tolerances for dark areas
+          const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
+          const satDiff = Math.abs(hsv1[1] - hsv2[1]);
+          const valDiff = Math.abs(hsv1[2] - hsv2[2]);
+
+          // Adjust tolerances based on value (brightness)
+          const dynamicValTolerance = valTolerance * (hsv1[2] / 100);
+          
+          const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
+          const satMatch = satDiff <= satTolerance ? 1 : 0;
+          const valMatch = valDiff <= dynamicValTolerance ? 1 : 0;
+
+          const pixelMatchScore = 
+            hueMatch * hueWeight +
+            satMatch * satWeight +
+            valMatch * valWeight;
+
+          blockMatchSum += pixelMatchScore;
+          blockPixels++;
+        }
+      }
+
+      // Weight blocks with edges more heavily
+      const blockScore = hasEdge ? 
+        (blockMatchSum / blockPixels) * 1.5 : 
+        (blockMatchSum / blockPixels);
+      
+      if (blockPixels > 0 && blockScore > 0.6) {
+        matchCount++;
+      }
+      totalBlocks++;
+    }
+  }
+
+  // Calculate final percentage with increased sensitivity to feature-rich areas
+  const rawPercentage = (matchCount / totalBlocks) * 100;
+  return Math.min(100, rawPercentage * 1.2);
+}, []);
 
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
