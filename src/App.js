@@ -18,177 +18,114 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const App = () => {
+  // URL Parameters
   const contentKey = new URLSearchParams(window.location.search).get('key');
+
+  // Refs
   const videoRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const canvasRef = useRef(null);
   const matchCanvasRef = useRef(null);
-  const targetImageRef = useRef(null);
 
+  // State
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
   const [videoUrl, setVideoUrl] = useState(null);
   const [imageUrl, setImageUrl] = useState(null);
   const [isMatched, setIsMatched] = useState(false);
+  const [referenceData, setReferenceData] = useState(null);
 
-  // RGB to HSV conversion helper
-  const rgbToHsv = (r, g, b) => {
-    r /= 255;
-    g /= 255;
-    b /= 255;
-
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const diff = max - min;
-
-    let h = 0;
-    let s = max === 0 ? 0 : diff / max;
-    let v = max;
-
-    if (diff !== 0) {
-      switch (max) {
-        case r:
-          h = 60 * ((g - b) / diff + (g < b ? 6 : 0));
-          break;
-        case g:
-          h = 60 * ((b - r) / diff + 2);
-          break;
-        case b:
-          h = 60 * ((r - g) / diff + 4);
-          break;
-        default:
-          break;
+  // Create reference screenshot when image loads
+  const createReferenceScreenshot = useCallback((image) => {
+    try {
+      if (!matchCanvasRef.current) {
+        setDebugInfo('Reference canvas not ready');
+        return;
       }
-    }
-
-    return [h, s * 100, v * 100];
-  };
-
-  // Compare images using HSV color space and regional comparison
-const compareImages = useCallback((imgData1, imgData2) => {
-  const width = imgData1.width;
-  const height = imgData1.height;
-  const blockSize = 8;
-  const hueWeight = 0.5;
-  const satWeight = 0.3;
-  const valWeight = 0.2;
-  const hueTolerance = 30;
-  const satTolerance = 30;
-  const valTolerance = 30;
-  
-  // Add light level detection
-  const checkLightLevel = (imgData) => {
-    let totalBrightness = 0;
-    let pixelCount = 0;
-    
-    // Sample every 4th pixel for performance
-    for (let i = 0; i < imgData.data.length; i += 16) {
-      const r = imgData.data[i];
-      const g = imgData.data[i + 1];
-      const b = imgData.data[i + 2];
       
-      // Calculate perceived brightness using relative luminance formula
-      const brightness = (0.299 * r + 0.587 * g + 0.114 * b);
-      totalBrightness += brightness;
-      pixelCount++;
-    }
-    
-    const averageBrightness = totalBrightness / pixelCount;
-    return averageBrightness;
-  };
-
-  // Check if either image is too dark
-  const brightness1 = checkLightLevel(imgData1);
-  const brightness2 = checkLightLevel(imgData2);
-  
-  const MIN_BRIGHTNESS = 30; // Minimum average brightness threshold
-  const MAX_BRIGHTNESS_DIFF = 50; // Maximum allowed brightness difference
-  
-  if (brightness1 < MIN_BRIGHTNESS || brightness2 < MIN_BRIGHTNESS) {
-    return 0; // Too dark, no match
-  }
-  
-  if (Math.abs(brightness1 - brightness2) > MAX_BRIGHTNESS_DIFF) {
-    return 0; // Too different in brightness, no match
-  }
-  
-  let matchCount = 0;
-  let totalBlocks = 0;
-  
-  // Enhanced block comparison with edge detection
-  for (let y = 0; y < height; y += blockSize) {
-    for (let x = 0; x < width; x += blockSize) {
-      let blockMatchSum = 0;
-      let blockPixels = 0;
-      let hasEdge = false;
+      const canvas = matchCanvasRef.current;
+      const ctx = canvas.getContext('2d');
       
-      // Check for edges in the block
-      for (let by = 0; by < blockSize && y + by < height; by++) {
-        for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-          const i = ((y + by) * width + (x + bx)) * 4;
-          
-          // Get RGB values
-          const r1 = imgData1.data[i];
-          const g1 = imgData1.data[i + 1];
-          const b1 = imgData1.data[i + 2];
-          
-          const r2 = imgData2.data[i];
-          const g2 = imgData2.data[i + 1];
-          const b2 = imgData2.data[i + 2];
-          
-          // Simple edge detection using intensity difference with neighbors
-          if (bx > 0 && by > 0) {
-            const prevI = ((y + by - 1) * width + (x + bx - 1)) * 4;
-            const intensity1 = (r1 + g1 + b1) / 3;
-            const prevIntensity1 = (imgData1.data[prevI] + imgData1.data[prevI + 1] + imgData1.data[prevI + 2]) / 3;
-            if (Math.abs(intensity1 - prevIntensity1) > 30) {
-              hasEdge = true;
+      // Set fixed dimensions for consistency
+      canvas.width = 640;
+      canvas.height = 480;
+      
+      // Clear canvas and draw new image
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+      
+      // Store the reference image data
+      const referenceImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      setReferenceData(referenceImageData);
+      setDebugInfo('Reference image captured');
+    } catch (error) {
+      console.error('Error creating reference screenshot:', error);
+      setDebugInfo('Error creating reference image');
+    }
+  }, []);
+
+  // Compare images
+  const compareImages = useCallback((capturedFrame) => {
+    if (!referenceData || !capturedFrame) return 0;
+
+    try {
+      const width = capturedFrame.width;
+      const height = capturedFrame.height;
+      const blockSize = 8;
+      let matchCount = 0;
+      let totalBlocks = 0;
+
+      // Compare blocks of pixels
+      for (let y = 0; y < height; y += blockSize) {
+        for (let x = 0; x < width; x += blockSize) {
+          let blockMatchSum = 0;
+          let blockPixels = 0;
+
+          // Compare pixels within each block
+          for (let by = 0; by < blockSize && y + by < height; by++) {
+            for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+              const i = ((y + by) * width + (x + bx)) * 4;
+              
+              // Get RGB values from both images
+              const r1 = capturedFrame.data[i];
+              const g1 = capturedFrame.data[i + 1];
+              const b1 = capturedFrame.data[i + 2];
+              
+              const r2 = referenceData.data[i];
+              const g2 = referenceData.data[i + 1];
+              const b2 = referenceData.data[i + 2];
+
+              // Calculate color difference
+              const colorDiff = (
+                Math.abs(r1 - r2) +
+                Math.abs(g1 - g2) +
+                Math.abs(b1 - b2)
+              ) / 3;
+
+              // Consider it a match if difference is small
+              const isMatch = colorDiff < 50;
+              blockMatchSum += isMatch ? 1 : 0;
+              blockPixels++;
             }
           }
 
-          // Convert to HSV
-          const hsv1 = rgbToHsv(r1, g1, b1);
-          const hsv2 = rgbToHsv(r2, g2, b2);
-
-          // Enhanced HSV comparison with stricter tolerances for dark areas
-          const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
-          const satDiff = Math.abs(hsv1[1] - hsv2[1]);
-          const valDiff = Math.abs(hsv1[2] - hsv2[2]);
-
-          // Adjust tolerances based on value (brightness)
-          const dynamicValTolerance = valTolerance * (hsv1[2] / 100);
-          
-          const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
-          const satMatch = satDiff <= satTolerance ? 1 : 0;
-          const valMatch = valDiff <= dynamicValTolerance ? 1 : 0;
-
-          const pixelMatchScore = 
-            hueMatch * hueWeight +
-            satMatch * satWeight +
-            valMatch * valWeight;
-
-          blockMatchSum += pixelMatchScore;
-          blockPixels++;
+          // If block has a good match percentage, count it
+          if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
+            matchCount++;
+          }
+          totalBlocks++;
         }
       }
 
-      // Weight blocks with edges more heavily
-      const blockScore = hasEdge ? 
-        (blockMatchSum / blockPixels) * 1.5 : 
-        (blockMatchSum / blockPixels);
-      
-      if (blockPixels > 0 && blockScore > 0.6) {
-        matchCount++;
-      }
-      totalBlocks++;
+      // Calculate final match percentage
+      return (matchCount / totalBlocks) * 100;
+    } catch (error) {
+      console.error('Error comparing images:', error);
+      return 0;
     }
-  }
+  }, [referenceData]);
 
-  // Calculate final percentage with increased sensitivity to feature-rich areas
-  const rawPercentage = (matchCount / totalBlocks) * 100;
-  return Math.min(100, rawPercentage * 1.2);
-}, []);
-
+  // Start video playback
   const startVideo = useCallback(async () => {
     if (!overlayVideoRef.current || !videoUrl || isVideoPlaying) return;
 
@@ -217,56 +154,43 @@ const compareImages = useCallback((imgData1, imgData2) => {
     }
   }, [videoUrl, isVideoPlaying]);
 
-  // Capture and compare frame
+  // Process camera frame
   const processCameraFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !matchCanvasRef.current) return;
+    if (!videoRef.current || !canvasRef.current || !referenceData) return;
 
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
+    try {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const context = canvas.getContext('2d');
 
-    // Set canvas dimensions to match reference image
-    canvas.width = matchCanvasRef.current.width;
-    canvas.height = matchCanvasRef.current.height;
+      // Match canvas dimensions with reference image
+      canvas.width = 640;
+      canvas.height = 480;
 
-    // Draw current video frame
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    
-    // Get image data from both canvases
-    const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
-    const referenceFrame = matchCanvasRef.current.getContext('2d')
-      .getImageData(0, 0, canvas.width, canvas.height);
-    
-    // Compare images and update score
-    const similarity = compareImages(capturedFrame, referenceFrame);
-    setDebugInfo(`Similarity: ${similarity.toFixed(1)}%`);
+      // Draw current video frame
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      // Get current frame data
+      const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+      
+      // Compare with reference
+      const similarity = compareImages(capturedFrame);
+      setDebugInfo(`Similarity: ${similarity.toFixed(1)}%`);
 
-    const SIMILARITY_THRESHOLD = 70;
-    const matched = similarity > SIMILARITY_THRESHOLD;
-    
-    if (matched && !isMatched) {
-      setIsMatched(true);
-      startVideo();
-    } else if (!matched && isMatched) {
-      setIsMatched(false);
+      const SIMILARITY_THRESHOLD = 60;
+      const matched = similarity > SIMILARITY_THRESHOLD;
+      
+      if (matched && !isMatched) {
+        setIsMatched(true);
+        startVideo();
+      } else if (!matched && isMatched) {
+        setIsMatched(false);
+      }
+    } catch (error) {
+      console.error('Error processing camera frame:', error);
+      setDebugInfo('Error processing camera frame');
     }
-  }, [compareImages, isMatched, startVideo]);
-
-  // Process target image when loaded
-  const processTargetImage = useCallback((image) => {
-    if (!matchCanvasRef.current) return;
-    
-    const canvas = matchCanvasRef.current;
-    const ctx = canvas.getContext('2d');
-    
-    // Set a fixed size for processing
-    canvas.width = 640;
-    canvas.height = 480;
-    
-    // Draw and scale the image
-    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-    setDebugInfo('Target image processed');
-  }, []);
+  }, [compareImages, isMatched, startVideo, referenceData]);
 
   // Load content from Firebase
   useEffect(() => {
@@ -277,7 +201,7 @@ const compareImages = useCallback((imgData1, imgData2) => {
       }
 
       try {
-        setDebugInfo('Verifying content...');
+        setDebugInfo('Loading content...');
         const arContentRef = collection(db, 'arContent');
         const q = query(
           arContentRef,
@@ -288,7 +212,7 @@ const compareImages = useCallback((imgData1, imgData2) => {
         const snapshot = await getDocs(q);
         
         if (snapshot.empty) {
-          setDebugInfo('Invalid or inactive content');
+          setDebugInfo('Invalid or inactive content key');
           return;
         }
 
@@ -297,31 +221,37 @@ const compareImages = useCallback((imgData1, imgData2) => {
         
         setVideoUrl(data.videoUrl);
         setImageUrl(data.imageUrl);
-        setDebugInfo('Content loaded');
+        setDebugInfo('Content loaded successfully');
         
       } catch (error) {
-        console.error('Content loading error:', error);
-        setDebugInfo(`Error: ${error.message}`);
+        console.error('Error loading content:', error);
+        setDebugInfo('Error loading content from Firebase');
       }
     };
 
     loadContent();
   }, [contentKey]);
 
-  // Handle target image loading
+  // Handle image loading
   useEffect(() => {
     if (!imageUrl) return;
 
     const image = new Image();
     image.crossOrigin = 'anonymous';
+    
     image.onload = () => {
-      targetImageRef.current = image;
-      processTargetImage(image);
+      createReferenceScreenshot(image);
     };
+    
+    image.onerror = (error) => {
+      console.error('Error loading image:', error);
+      setDebugInfo('Error loading reference image');
+    };
+    
     image.src = imageUrl;
-  }, [imageUrl, processTargetImage]);
+  }, [imageUrl, createReferenceScreenshot]);
 
-  // Camera setup with frame processing
+  // Setup camera
   useEffect(() => {
     let isComponentMounted = true;
     let currentStream = null;
@@ -333,36 +263,23 @@ const compareImages = useCallback((imgData1, imgData2) => {
           video: {
             facingMode: 'environment',
             width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30 }
+            height: { ideal: 720 }
           }
         });
 
         if (!isComponentMounted) return;
 
-        const videoTrack = stream.getVideoTracks()[0];
-        await videoTrack.applyConstraints({
-          advanced: [
-            { exposureMode: "continuous" },
-            { focusMode: "continuous" },
-            { whiteBalanceMode: "continuous" }
-          ]
-        }).catch(() => {});
-
         currentStream = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-          setDebugInfo('Camera ready');
+          setDebugInfo('Camera active');
           
-          // Start frame processing
           frameProcessingInterval = setInterval(processCameraFrame, 500);
         }
       } catch (error) {
         console.error('Camera error:', error);
-        if (isComponentMounted) {
-          setDebugInfo(`Camera error: ${error.message}`);
-        }
+        setDebugInfo('Error accessing camera');
       }
     };
 
@@ -419,7 +336,8 @@ const compareImages = useCallback((imgData1, imgData2) => {
       color: 'white',
       padding: '10px',
       borderRadius: '5px',
-      zIndex: 30
+      zIndex: 30,
+      fontFamily: 'monospace'
     },
     imagePreview: {
       position: 'absolute',
@@ -473,6 +391,7 @@ const compareImages = useCallback((imgData1, imgData2) => {
       <div style={styles.debugInfo}>
         <div>Status: {debugInfo}</div>
         <div>Key: {contentKey || 'Not found'}</div>
+        <div>Reference Image: {referenceData ? 'Loaded' : 'Not Loaded'}</div>
         <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
         <div>Image Matched: {isMatched ? 'Yes' : 'No'}</div>
@@ -480,7 +399,12 @@ const compareImages = useCallback((imgData1, imgData2) => {
 
       {imageUrl && (
         <div style={styles.imagePreview}>
-          <img src={imageUrl} alt="Target" style={styles.previewImage} />
+          <img 
+            src={imageUrl} 
+            alt="Target" 
+            style={styles.previewImage}
+            crossOrigin="anonymous"
+          />
         </div>
       )}
     </div>
