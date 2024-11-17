@@ -18,15 +18,14 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const App = () => {
-  // URL Parameters
   const contentKey = new URLSearchParams(window.location.search).get('key');
-
+  
   // Refs
   const videoRef = useRef(null);
   const overlayVideoRef = useRef(null);
   const canvasRef = useRef(null);
   const matchCanvasRef = useRef(null);
-
+  
   // State
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [debugInfo, setDebugInfo] = useState('Initializing...');
@@ -34,39 +33,13 @@ const App = () => {
   const [imageUrl, setImageUrl] = useState(null);
   const [isMatched, setIsMatched] = useState(false);
   const [referenceData, setReferenceData] = useState(null);
-
-  // Create reference screenshot when image loads
-  const createReferenceScreenshot = useCallback((image) => {
-    try {
-      if (!matchCanvasRef.current) {
-        setDebugInfo('Reference canvas not ready');
-        return;
-      }
-      
-      const canvas = matchCanvasRef.current;
-      const ctx = canvas.getContext('2d');
-      
-      // Set fixed dimensions for consistency
-      canvas.width = 640;
-      canvas.height = 480;
-      
-      // Clear canvas and draw new image
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-      
-      // Store the reference image data
-      const referenceImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      setReferenceData(referenceImageData);
-      setDebugInfo('Reference image captured');
-    } catch (error) {
-      console.error('Error creating reference screenshot:', error);
-      setDebugInfo('Error creating reference image');
-    }
-  }, []);
+  const [lastError, setLastError] = useState(null);
 
   // Compare images
   const compareImages = useCallback((capturedFrame) => {
-    if (!referenceData || !capturedFrame) return 0;
+    if (!referenceData || !capturedFrame) {
+      return 0;
+    }
 
     try {
       const width = capturedFrame.width;
@@ -75,18 +48,15 @@ const App = () => {
       let matchCount = 0;
       let totalBlocks = 0;
 
-      // Compare blocks of pixels
       for (let y = 0; y < height; y += blockSize) {
         for (let x = 0; x < width; x += blockSize) {
           let blockMatchSum = 0;
           let blockPixels = 0;
 
-          // Compare pixels within each block
           for (let by = 0; by < blockSize && y + by < height; by++) {
             for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
               const i = ((y + by) * width + (x + bx)) * 4;
               
-              // Get RGB values from both images
               const r1 = capturedFrame.data[i];
               const g1 = capturedFrame.data[i + 1];
               const b1 = capturedFrame.data[i + 2];
@@ -95,21 +65,18 @@ const App = () => {
               const g2 = referenceData.data[i + 1];
               const b2 = referenceData.data[i + 2];
 
-              // Calculate color difference
               const colorDiff = (
                 Math.abs(r1 - r2) +
                 Math.abs(g1 - g2) +
                 Math.abs(b1 - b2)
               ) / 3;
 
-              // Consider it a match if difference is small
               const isMatch = colorDiff < 50;
               blockMatchSum += isMatch ? 1 : 0;
               blockPixels++;
             }
           }
 
-          // If block has a good match percentage, count it
           if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
             matchCount++;
           }
@@ -117,10 +84,10 @@ const App = () => {
         }
       }
 
-      // Calculate final match percentage
       return (matchCount / totalBlocks) * 100;
     } catch (error) {
-      console.error('Error comparing images:', error);
+      console.error('Comparison error:', error);
+      setLastError('Image comparison failed: ' + error.message);
       return 0;
     }
   }, [referenceData]);
@@ -139,15 +106,17 @@ const App = () => {
       console.error('Video playback error:', error);
       setDebugInfo('Click anywhere to play video with sound');
       
-      const playOnClick = () => {
+      const playOnClick = async () => {
         if (overlayVideoRef.current) {
-          overlayVideoRef.current.play()
-            .then(() => {
-              setIsVideoPlaying(true);
-              setDebugInfo('Video playing with sound');
-              document.removeEventListener('click', playOnClick);
-            })
-            .catch(console.error);
+          try {
+            await overlayVideoRef.current.play();
+            setIsVideoPlaying(true);
+            setDebugInfo('Video playing with sound');
+            document.removeEventListener('click', playOnClick);
+          } catch (err) {
+            console.error('Click play error:', err);
+            setLastError('Video play failed: ' + err.message);
+          }
         }
       };
       document.addEventListener('click', playOnClick);
@@ -156,24 +125,21 @@ const App = () => {
 
   // Process camera frame
   const processCameraFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !referenceData) return;
+    if (!videoRef.current || !canvasRef.current || !referenceData) {
+      return;
+    }
 
     try {
       const video = videoRef.current;
       const canvas = canvasRef.current;
       const context = canvas.getContext('2d');
 
-      // Match canvas dimensions with reference image
       canvas.width = 640;
       canvas.height = 480;
 
-      // Draw current video frame
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      
-      // Get current frame data
       const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
       
-      // Compare with reference
       const similarity = compareImages(capturedFrame);
       setDebugInfo(`Similarity: ${similarity.toFixed(1)}%`);
 
@@ -187,8 +153,8 @@ const App = () => {
         setIsMatched(false);
       }
     } catch (error) {
-      console.error('Error processing camera frame:', error);
-      setDebugInfo('Error processing camera frame');
+      console.error('Frame processing error:', error);
+      setLastError('Frame processing failed: ' + error.message);
     }
   }, [compareImages, isMatched, startVideo, referenceData]);
 
@@ -201,7 +167,7 @@ const App = () => {
       }
 
       try {
-        setDebugInfo('Loading content...');
+        setDebugInfo('Loading content from Firebase...');
         const arContentRef = collection(db, 'arContent');
         const q = query(
           arContentRef,
@@ -219,13 +185,29 @@ const App = () => {
         const doc = snapshot.docs[0];
         const data = doc.data();
         
-        setVideoUrl(data.videoUrl);
-        setImageUrl(data.imageUrl);
-        setDebugInfo('Content loaded successfully');
+        if (!data.imageUrl) {
+          setDebugInfo('No image URL in Firebase document');
+          return;
+        }
+
+        if (!data.videoUrl) {
+          setDebugInfo('No video URL in Firebase document');
+          return;
+        }
+
+        setDebugInfo('Firebase data loaded, setting URLs...');
         
+        // Set video URL first
+        setVideoUrl(data.videoUrl);
+        
+        // Set image URL with a slight delay
+        setTimeout(() => {
+          setImageUrl(data.imageUrl);
+        }, 100);
+
       } catch (error) {
-        console.error('Error loading content:', error);
-        setDebugInfo('Error loading content from Firebase');
+        console.error('Firebase load error:', error);
+        setLastError('Firebase load failed: ' + error.message);
       }
     };
 
@@ -234,22 +216,57 @@ const App = () => {
 
   // Handle image loading
   useEffect(() => {
-    if (!imageUrl) return;
+    if (!imageUrl) {
+      setDebugInfo('No image URL available');
+      return;
+    }
 
-    const image = new Image();
-    image.crossOrigin = 'anonymous';
-    
-    image.onload = () => {
-      createReferenceScreenshot(image);
+    setDebugInfo('Starting image load...');
+
+    const loadImage = async () => {
+      try {
+        const image = new Image();
+        
+        const imageLoadPromise = new Promise((resolve, reject) => {
+          image.onload = () => resolve(image);
+          image.onerror = (e) => reject(new Error('Failed to load image: ' + e));
+        });
+
+        image.crossOrigin = 'anonymous';
+        image.src = imageUrl + '?t=' + new Date().getTime(); // Prevent caching
+
+        const loadedImage = await imageLoadPromise;
+        setDebugInfo('Image loaded successfully, creating reference...');
+        
+        if (!matchCanvasRef.current) {
+          throw new Error('Reference canvas not available');
+        }
+
+        const canvas = matchCanvasRef.current;
+        const ctx = canvas.getContext('2d');
+
+        canvas.width = 640;
+        canvas.height = 480;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(loadedImage, 0, 0, canvas.width, canvas.height);
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        setReferenceData(imageData);
+        setDebugInfo('Reference image created successfully');
+
+      } catch (error) {
+        console.error('Image loading error:', error);
+        setLastError('Image load failed: ' + error.message);
+        setDebugInfo('Error loading image - retrying...');
+
+        // Retry after 2 seconds
+        setTimeout(loadImage, 2000);
+      }
     };
-    
-    image.onerror = (error) => {
-      console.error('Error loading image:', error);
-      setDebugInfo('Error loading reference image');
-    };
-    
-    image.src = imageUrl;
-  }, [imageUrl, createReferenceScreenshot]);
+
+    loadImage();
+  }, [imageUrl]);
 
   // Setup camera
   useEffect(() => {
@@ -279,6 +296,7 @@ const App = () => {
         }
       } catch (error) {
         console.error('Camera error:', error);
+        setLastError('Camera access failed: ' + error.message);
         setDebugInfo('Error accessing camera');
       }
     };
@@ -337,7 +355,10 @@ const App = () => {
       padding: '10px',
       borderRadius: '5px',
       zIndex: 30,
-      fontFamily: 'monospace'
+      fontFamily: 'monospace',
+      fontSize: '12px',
+      maxWidth: '80%',
+      wordWrap: 'break-word'
     },
     imagePreview: {
       position: 'absolute',
@@ -391,19 +412,29 @@ const App = () => {
       <div style={styles.debugInfo}>
         <div>Status: {debugInfo}</div>
         <div>Key: {contentKey || 'Not found'}</div>
-        <div>Reference Image: {referenceData ? 'Loaded' : 'Not Loaded'}</div>
+        <div>Image URL: {imageUrl ? 'Present' : 'Missing'}</div>
+        <div>Reference Data: {referenceData ? `${referenceData.width}x${referenceData.height}` : 'Not loaded'}</div>
         <div>Camera Active: {videoRef.current?.srcObject ? 'Yes' : 'No'}</div>
         <div>Video Playing: {isVideoPlaying ? 'Yes' : 'No'}</div>
         <div>Image Matched: {isMatched ? 'Yes' : 'No'}</div>
+        {lastError && <div style={{color: 'red'}}>Error: {lastError}</div>}
+        <div>Last Update: {new Date().toLocaleTimeString()}</div>
       </div>
 
       {imageUrl && (
         <div style={styles.imagePreview}>
           <img 
-            src={imageUrl} 
+            src={`${imageUrl}?t=${new Date().getTime()}`}
             alt="Target" 
             style={styles.previewImage}
             crossOrigin="anonymous"
+            onError={(e) => {
+              console.error('Preview image load error:', e);
+              setLastError('Preview image load failed');
+            }}
+            onLoad={() => {
+              console.log('Preview image loaded successfully');
+            }}
           />
         </div>
       )}
