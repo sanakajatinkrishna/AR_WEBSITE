@@ -9,35 +9,50 @@ const MultiARImageMatcher = () => {
   const [showMatchVideo, setShowMatchVideo] = useState(false);
   const [hasUserInteraction, setHasUserInteraction] = useState(false);
   const [currentMatch, setCurrentMatch] = useState(null);
+  const [referenceImages, setReferenceImages] = useState({});
   const lastMatchTime = useRef(0);
   const MATCH_TIMEOUT = 300;
   const MATCH_THRESHOLD = 70;
 
-  // Move contentPairs into useMemo to prevent unnecessary recreations
+  // Define content pairs
   const contentPairs = useMemo(() => [
     {
       id: '1',
-      referenceImage: './assets/images/reference1.jpg',
-      matchVideo: './assets/videos/match1.mp4',
+      referenceImage: '/assets/images/reference1.jpg', // Make sure path is correct
+      matchVideo: '/assets/videos/match1.mp4',
       title: 'Match 1'
     },
     {
       id: '2',
-      referenceImage: './assets/images/reference2.jpg',
-      matchVideo: './assets/videos/match2.mp4',
+      referenceImage: '/assets/images/reference2.jpg',
+      matchVideo: '/assets/videos/match2.mp4',
       title: 'Match 2'
-    },
-    // Add more pairs as needed
-  ], []); // Empty dependency array since this data is static
-
-  useEffect(() => {
-    if (matchVideoRef.current) {
-      matchVideoRef.current.load();
-      matchVideoRef.current.muted = false;
-      matchVideoRef.current.setAttribute('playsinline', '');
-      matchVideoRef.current.setAttribute('webkit-playsinline', '');
     }
-  }, [currentMatch]);
+  ], []);
+
+  // Preload reference images
+  useEffect(() => {
+    const loadImages = async () => {
+      const loadedImages = {};
+      for (const pair of contentPairs) {
+        const img = new Image();
+        img.src = pair.referenceImage;
+        await new Promise((resolve) => {
+          img.onload = () => {
+            loadedImages[pair.id] = img;
+            resolve();
+          };
+          img.onerror = () => {
+            console.error(`Failed to load image: ${pair.referenceImage}`);
+            resolve();
+          };
+        });
+      }
+      setReferenceImages(loadedImages);
+    };
+    
+    loadImages();
+  }, [contentPairs]);
 
   const rgbToHsv = useCallback((r, g, b) => {
     r /= 255;
@@ -72,8 +87,8 @@ const MultiARImageMatcher = () => {
   }, []);
 
   const compareImages = useCallback((imgData1, imgData2) => {
-    const width = imgData1.width;
-    const height = imgData1.height;
+    const width = Math.min(imgData1.width, imgData2.width);
+    const height = Math.min(imgData1.height, imgData2.height);
     const blockSize = 8;
     const hueWeight = 0.5;
     const satWeight = 0.3;
@@ -137,15 +152,23 @@ const MultiARImageMatcher = () => {
     let bestMatch = null;
     let bestScore = 0;
 
+    // Create a temporary canvas for scaling reference images
+    const tempCanvas = document.createElement('canvas');
+    const tempContext = tempCanvas.getContext('2d');
+    tempCanvas.width = capturedFrame.width;
+    tempCanvas.height = capturedFrame.height;
+
     for (const pair of contentPairs) {
-      const refImg = new Image();
-      refImg.src = pair.referenceImage;
-      
-      context.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-      context.drawImage(refImg, 0, 0, canvasRef.current.width, canvasRef.current.height);
-      const referenceData = context.getImageData(0, 0, canvasRef.current.width, canvasRef.current.height);
+      const refImg = referenceImages[pair.id];
+      if (!refImg) continue;
+
+      // Scale reference image to match captured frame size
+      tempContext.clearRect(0, 0, tempCanvas.width, tempCanvas.height);
+      tempContext.drawImage(refImg, 0, 0, tempCanvas.width, tempCanvas.height);
+      const referenceData = tempContext.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
       
       const score = compareImages(capturedFrame, referenceData);
+      console.log(`Match score for ${pair.title}:`, score);
       
       if (score > MATCH_THRESHOLD && score > bestScore) {
         bestScore = score;
@@ -154,20 +177,25 @@ const MultiARImageMatcher = () => {
     }
 
     return bestMatch;
-  }, [compareImages, contentPairs, MATCH_THRESHOLD]);
+  }, [compareImages, contentPairs, referenceImages, MATCH_THRESHOLD]);
 
   const playUnmutedVideo = useCallback(async () => {
     if (matchVideoRef.current) {
       try {
         matchVideoRef.current.volume = 1;
         matchVideoRef.current.muted = false;
-        await matchVideoRef.current.play();
+        const playPromise = matchVideoRef.current.play();
+        if (playPromise !== undefined) {
+          await playPromise;
+          console.log('Video playing with sound');
+        }
       } catch (error) {
         console.error('Error playing video:', error);
         try {
           matchVideoRef.current.muted = true;
           await matchVideoRef.current.play();
           matchVideoRef.current.muted = false;
+          console.log('Video playing after fallback');
         } catch (fallbackError) {
           console.error('Fallback playback failed:', fallbackError);
         }
@@ -238,25 +266,28 @@ const MultiARImageMatcher = () => {
   }, [showMatchVideo, currentMatch, playUnmutedVideo, MATCH_TIMEOUT]);
 
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current) return;
+    if (!videoRef.current || !canvasRef.current || Object.keys(referenceImages).length === 0) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
+    // Set canvas size to match video dimensions
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
+    
+    // Capture and process frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
     const bestMatch = findBestMatch(capturedFrame, context);
     setMatchScore(bestMatch?.score || 0);
     handleMatchState(bestMatch);
-  }, [findBestMatch, handleMatchState]);
+  }, [findBestMatch, handleMatchState, referenceImages]);
 
   useEffect(() => {
     let intervalId;
-    if (isStreaming) {
+    if (isStreaming && Object.keys(referenceImages).length > 0) {
       intervalId = setInterval(captureFrame, 100);
     }
     return () => {
@@ -264,7 +295,7 @@ const MultiARImageMatcher = () => {
         clearInterval(intervalId);
       }
     };
-  }, [isStreaming, captureFrame]);
+  }, [isStreaming, captureFrame, referenceImages]);
 
   useEffect(() => {
     return () => {
@@ -350,7 +381,7 @@ const MultiARImageMatcher = () => {
         </button>
       </div>
 
-      {matchScore !== null && currentMatch && (
+      {matchScore !== null && (
         <div style={{
           position: 'fixed',
           bottom: '20px',
@@ -362,8 +393,8 @@ const MultiARImageMatcher = () => {
           zIndex: 30
         }}>
           <h3 style={{ margin: 0, textAlign: 'center', fontSize: '1.2rem' }}>
-            {currentMatch.title}: {matchScore.toFixed(1)}%
-            {matchScore > MATCH_THRESHOLD && 
+            {currentMatch ? `${currentMatch.title}: ${matchScore.toFixed(1)}%` : `No match: ${matchScore.toFixed(1)}%`}
+            {matchScore > MATCH_THRESHOLD && currentMatch && 
               <span style={{ color: '#059669' }}> - Match Detected!</span>
             }
           </h3>
