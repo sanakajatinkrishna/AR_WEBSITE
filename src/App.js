@@ -3,22 +3,23 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 const MultiARImageMatcher = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const debugCanvasRef = useRef(null);
   const matchVideoRef = useRef(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(null);
   const [showMatchVideo, setShowMatchVideo] = useState(false);
   const [hasUserInteraction, setHasUserInteraction] = useState(false);
   const [currentMatch, setCurrentMatch] = useState(null);
-  const [referenceImages, setReferenceImages] = useState({});
+  const [debugMode, setDebugMode] = useState(false);
   const lastMatchTime = useRef(0);
   const MATCH_TIMEOUT = 300;
-  const MATCH_THRESHOLD = 70;
+  const MATCH_THRESHOLD = 50; // Lowered threshold for easier matching
 
   // Define content pairs
   const contentPairs = useMemo(() => [
     {
       id: '1',
-      referenceImage: '/assets/images/reference1.jpg', // Make sure path is correct
+      referenceImage: '/assets/images/reference1.jpg',
       matchVideo: '/assets/videos/match1.mp4',
       title: 'Match 1'
     },
@@ -30,165 +31,127 @@ const MultiARImageMatcher = () => {
     }
   ], []);
 
-  // Preload reference images
-  useEffect(() => {
-    const loadImages = async () => {
-      const loadedImages = {};
-      for (const pair of contentPairs) {
-        const img = new Image();
-        img.src = pair.referenceImage;
-        await new Promise((resolve) => {
-          img.onload = () => {
-            loadedImages[pair.id] = img;
-            resolve();
-          };
-          img.onerror = () => {
-            console.error(`Failed to load image: ${pair.referenceImage}`);
-            resolve();
-          };
-        });
-      }
-      setReferenceImages(loadedImages);
-    };
-    
-    loadImages();
-  }, [contentPairs]);
+  // Simple feature extraction - average color in grid cells
+  const extractFeatures = useCallback((imageData, gridSize = 8) => {
+    const { width, height, data } = imageData;
+    const cellWidth = Math.floor(width / gridSize);
+    const cellHeight = Math.floor(height / gridSize);
+    const features = [];
 
-  const rgbToHsv = useCallback((r, g, b) => {
-    r /= 255;
-    g /= 255;
-    b /= 255;
-
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const diff = max - min;
-
-    let h = 0;
-    let s = max === 0 ? 0 : diff / max;
-    let v = max;
-
-    if (diff !== 0) {
-      switch (max) {
-        case r:
-          h = 60 * ((g - b) / diff + (g < b ? 6 : 0));
-          break;
-        case g:
-          h = 60 * ((b - r) / diff + 2);
-          break;
-        case b:
-          h = 60 * ((r - g) / diff + 4);
-          break;
-        default:
-          break;
-      }
-    }
-
-    return [h, s * 100, v * 100];
-  }, []);
-
-  const compareImages = useCallback((imgData1, imgData2) => {
-    const width = Math.min(imgData1.width, imgData2.width);
-    const height = Math.min(imgData1.height, imgData2.height);
-    const blockSize = 8;
-    const hueWeight = 0.5;
-    const satWeight = 0.3;
-    const valWeight = 0.2;
-    const hueTolerance = 30;
-    const satTolerance = 30;
-    const valTolerance = 30;
-    
-    let matchCount = 0;
-    let totalBlocks = 0;
-
-    for (let y = 0; y < height; y += blockSize) {
-      for (let x = 0; x < width; x += blockSize) {
-        let blockMatchSum = 0;
-        let blockPixels = 0;
-
-        for (let by = 0; by < blockSize && y + by < height; by++) {
-          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
-            const i = ((y + by) * width + (x + bx)) * 4;
-            
-            const r1 = imgData1.data[i];
-            const g1 = imgData1.data[i + 1];
-            const b1 = imgData1.data[i + 2];
-            
-            const r2 = imgData2.data[i];
-            const g2 = imgData2.data[i + 1];
-            const b2 = imgData2.data[i + 2];
-
-            const hsv1 = rgbToHsv(r1, g1, b1);
-            const hsv2 = rgbToHsv(r2, g2, b2);
-
-            const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
-            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
-            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
-
-            const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
-            const satMatch = satDiff <= satTolerance ? 1 : 0;
-            const valMatch = valDiff <= valTolerance ? 1 : 0;
-
-            const pixelMatchScore = 
-              hueMatch * hueWeight +
-              satMatch * satWeight +
-              valMatch * valWeight;
-
-            blockMatchSum += pixelMatchScore;
-            blockPixels++;
+    for (let y = 0; y < gridSize; y++) {
+      for (let x = 0; x < gridSize; x++) {
+        let r = 0, g = 0, b = 0, count = 0;
+        
+        for (let cy = y * cellHeight; cy < (y + 1) * cellHeight && cy < height; cy++) {
+          for (let cx = x * cellWidth; cx < (x + 1) * cellWidth && cx < width; cx++) {
+            const i = (cy * width + cx) * 4;
+            r += data[i];
+            g += data[i + 1];
+            b += data[i + 2];
+            count++;
           }
         }
 
-        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
-          matchCount++;
-        }
-        totalBlocks++;
+        features.push({
+          r: r / count,
+          g: g / count,
+          b: b / count
+        });
       }
     }
 
-    return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
-  }, [rgbToHsv]);
+    return features;
+  }, []);
+
+  // Compare features between two images
+  const compareFeatures = useCallback((features1, features2) => {
+    if (features1.length !== features2.length) return 0;
+    
+    let totalDiff = 0;
+    const maxDiff = Math.sqrt(3 * 255 * 255); // Maximum possible difference per cell
+
+    features1.forEach((f1, i) => {
+      const f2 = features2[i];
+      const rDiff = f1.r - f2.r;
+      const gDiff = f1.g - f2.g;
+      const bDiff = f1.b - f2.b;
+      const diff = Math.sqrt(rDiff * rDiff + gDiff * gDiff + bDiff * bDiff);
+      totalDiff += 1 - (diff / maxDiff);
+    });
+
+    return (totalDiff / features1.length) * 100;
+  }, []);
+
+  // Draw debug visualization
+  const drawDebug = useCallback((capturedFeatures, referenceFeatures, context, width, height) => {
+    const gridSize = 8;
+    const cellWidth = Math.floor(width / gridSize);
+    const cellHeight = Math.floor(height / gridSize);
+
+    context.clearRect(0, 0, width, height);
+
+    capturedFeatures.forEach((feature, i) => {
+      const x = (i % gridSize) * cellWidth;
+      const y = Math.floor(i / gridSize) * cellHeight;
+      const refFeature = referenceFeatures[i];
+
+      // Draw captured feature
+      context.fillStyle = `rgb(${feature.r},${feature.g},${feature.b})`;
+      context.fillRect(x, y, cellWidth/2, cellHeight);
+
+      // Draw reference feature
+      context.fillStyle = `rgb(${refFeature.r},${refFeature.g},${refFeature.b})`;
+      context.fillRect(x + cellWidth/2, y, cellWidth/2, cellHeight);
+    });
+  }, []);
 
   const findBestMatch = useCallback((capturedFrame, context) => {
     let bestMatch = null;
     let bestScore = 0;
 
-    // Create a temporary canvas for scaling reference images
+    // Extract features from captured frame
+    const capturedFeatures = extractFeatures(capturedFrame);
+
+    // Create temp canvas for processing reference images
     const tempCanvas = document.createElement('canvas');
     const tempContext = tempCanvas.getContext('2d');
     tempCanvas.width = capturedFrame.width;
     tempCanvas.height = capturedFrame.height;
 
     for (const pair of contentPairs) {
-      const refImg = referenceImages[pair.id];
-      if (!refImg) continue;
+      const img = new Image();
+      img.src = pair.referenceImage;
 
-      // Scale reference image to match captured frame size
       tempContext.clearRect(0, 0, tempCanvas.width, tempCanvas.height);
-      tempContext.drawImage(refImg, 0, 0, tempCanvas.width, tempCanvas.height);
-      const referenceData = tempContext.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+      tempContext.drawImage(img, 0, 0, tempCanvas.width, tempCanvas.height);
+      const referenceFrame = tempContext.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+      const referenceFeatures = extractFeatures(referenceFrame);
       
-      const score = compareImages(capturedFrame, referenceData);
+      const score = compareFeatures(capturedFeatures, referenceFeatures);
       console.log(`Match score for ${pair.title}:`, score);
-      
+
       if (score > MATCH_THRESHOLD && score > bestScore) {
         bestScore = score;
         bestMatch = { ...pair, score };
+
+        // Update debug visualization if debug mode is on
+        if (debugMode && debugCanvasRef.current) {
+          const debugContext = debugCanvasRef.current.getContext('2d');
+          drawDebug(capturedFeatures, referenceFeatures, debugContext, capturedFrame.width, capturedFrame.height);
+        }
       }
     }
 
     return bestMatch;
-  }, [compareImages, contentPairs, referenceImages, MATCH_THRESHOLD]);
+  }, [extractFeatures, compareFeatures, contentPairs, MATCH_THRESHOLD, debugMode, drawDebug]);
 
   const playUnmutedVideo = useCallback(async () => {
     if (matchVideoRef.current) {
       try {
         matchVideoRef.current.volume = 1;
         matchVideoRef.current.muted = false;
-        const playPromise = matchVideoRef.current.play();
-        if (playPromise !== undefined) {
-          await playPromise;
-          console.log('Video playing with sound');
-        }
+        await matchVideoRef.current.play();
+        console.log('Video started playing with sound');
       } catch (error) {
         console.error('Error playing video:', error);
         try {
@@ -202,11 +165,6 @@ const MultiARImageMatcher = () => {
       }
     }
   }, []);
-
-  const handleUserInteraction = async () => {
-    setHasUserInteraction(true);
-    await startCamera();
-  };
 
   const startCamera = async () => {
     try {
@@ -224,6 +182,11 @@ const MultiARImageMatcher = () => {
     } catch (err) {
       console.error('Error accessing camera:', err);
     }
+  };
+
+  const handleUserInteraction = async () => {
+    setHasUserInteraction(true);
+    await startCamera();
   };
 
   const stopCamera = useCallback(() => {
@@ -263,31 +226,33 @@ const MultiARImageMatcher = () => {
         matchVideoRef.current.pause();
       }
     }
-  }, [showMatchVideo, currentMatch, playUnmutedVideo, MATCH_TIMEOUT]);
+  }, [showMatchVideo, currentMatch, playUnmutedVideo]);
 
   const captureFrame = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || Object.keys(referenceImages).length === 0) return;
+    if (!videoRef.current || !canvasRef.current) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
-    // Set canvas size to match video dimensions
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    
-    // Capture and process frame
+    if (debugCanvasRef.current) {
+      debugCanvasRef.current.width = video.videoWidth;
+      debugCanvasRef.current.height = video.videoHeight;
+    }
+
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
     const bestMatch = findBestMatch(capturedFrame, context);
     setMatchScore(bestMatch?.score || 0);
     handleMatchState(bestMatch);
-  }, [findBestMatch, handleMatchState, referenceImages]);
+  }, [findBestMatch, handleMatchState]);
 
   useEffect(() => {
     let intervalId;
-    if (isStreaming && Object.keys(referenceImages).length > 0) {
+    if (isStreaming) {
       intervalId = setInterval(captureFrame, 100);
     }
     return () => {
@@ -295,7 +260,7 @@ const MultiARImageMatcher = () => {
         clearInterval(intervalId);
       }
     };
-  }, [isStreaming, captureFrame, referenceImages]);
+  }, [isStreaming, captureFrame]);
 
   useEffect(() => {
     return () => {
@@ -358,12 +323,30 @@ const MultiARImageMatcher = () => {
         ref={canvasRef}
         style={{ display: 'none' }}
       />
+
+      {debugMode && (
+        <canvas
+          ref={debugCanvasRef}
+          style={{
+            position: 'fixed',
+            bottom: '80px',
+            right: '20px',
+            width: '200px',
+            height: '150px',
+            border: '2px solid white',
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            zIndex: 30
+          }}
+        />
+      )}
       
       <div style={{
         position: 'fixed',
         top: '20px',
         left: '20px',
-        zIndex: 30
+        zIndex: 30,
+        display: 'flex',
+        gap: '10px'
       }}>
         <button
           onClick={hasUserInteraction ? stopCamera : handleUserInteraction}
@@ -378,6 +361,20 @@ const MultiARImageMatcher = () => {
           }}
         >
           {isStreaming ? "Stop Camera" : "Start Experience"}
+        </button>
+        <button
+          onClick={() => setDebugMode(!debugMode)}
+          style={{
+            padding: '8px 16px',
+            backgroundColor: debugMode ? '#059669' : '#6b7280',
+            color: 'white',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontWeight: '500'
+          }}
+        >
+          Debug Mode: {debugMode ? 'ON' : 'OFF'}
         </button>
       </div>
 
