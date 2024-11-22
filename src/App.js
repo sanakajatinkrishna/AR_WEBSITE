@@ -10,60 +10,19 @@ const ARImageMatcher = () => {
   const [orientation, setOrientation] = useState({ alpha: 0, beta: 0, gamma: 0 });
   const lastMatchTime = useRef(0);
   const MATCH_TIMEOUT = 500;
+  const MATCH_THRESHOLD = 80;
 
   const referenceImage = require('./assets/images/reference.jpg');
   const matchVideo = require('./assets/videos/match.mp4');
 
-  const handleOrientation = useCallback((event) => {
-    setOrientation({
-      alpha: event.alpha || 0,
-      beta: event.beta || 0,
-      gamma: event.gamma || 0
-    });
+  // Initialize video when component mounts
+  useEffect(() => {
+    if (matchVideoRef.current) {
+      matchVideoRef.current.load();
+    }
   }, []);
 
-  const requestOrientationPermission = useCallback(async () => {
-    if (typeof DeviceOrientationEvent !== 'undefined' && 
-        typeof DeviceOrientationEvent.requestPermission === 'function') {
-      try {
-        const permissionState = await DeviceOrientationEvent.requestPermission();
-        if (permissionState === 'granted') {
-          window.addEventListener('deviceorientation', handleOrientation);
-        }
-      } catch (err) {
-        console.error('Error requesting orientation permission:', err);
-      }
-    } else {
-      window.addEventListener('deviceorientation', handleOrientation);
-    }
-  }, [handleOrientation]);
-
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        } 
-      });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        setIsStreaming(true);
-      }
-    } catch (err) {
-      console.error('Error accessing camera:', err);
-    }
-  };
-
-  const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-      setIsStreaming(false);
-    }
-  };
-
+  // Convert RGB to HSV
   const rgbToHsv = (r, g, b) => {
     r /= 255;
     g /= 255;
@@ -96,6 +55,7 @@ const ARImageMatcher = () => {
     return [h, s * 100, v * 100];
   };
 
+  // Compare images
   const compareImages = useCallback((imgData1, imgData2) => {
     const width = imgData1.width;
     const height = imgData1.height;
@@ -158,21 +118,91 @@ const ARImageMatcher = () => {
     return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
   }, []);
 
+  // Handle device orientation
+  const handleOrientation = useCallback((event) => {
+    setOrientation({
+      alpha: event.alpha || 0,
+      beta: event.beta || 0,
+      gamma: event.gamma || 0
+    });
+  }, []);
+
+  // Request device orientation permission
+  const requestOrientationPermission = useCallback(async () => {
+    if (typeof DeviceOrientationEvent !== 'undefined' && 
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        const permissionState = await DeviceOrientationEvent.requestPermission();
+        if (permissionState === 'granted') {
+          window.addEventListener('deviceorientation', handleOrientation);
+        }
+      } catch (err) {
+        console.error('Error requesting orientation permission:', err);
+      }
+    } else {
+      window.addEventListener('deviceorientation', handleOrientation);
+    }
+  }, [handleOrientation]);
+
+  // Start camera
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        } 
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        setIsStreaming(true);
+      }
+    } catch (err) {
+      console.error('Error accessing camera:', err);
+    }
+  };
+
+  // Stop camera
+  const stopCamera = useCallback(() => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+      setIsStreaming(false);
+      setShowMatchVideo(false);
+      if (matchVideoRef.current) {
+        matchVideoRef.current.pause();
+      }
+    }
+  }, []);
+
+  // Handle match state and video playback
   const handleMatchState = useCallback((score) => {
     const currentTime = Date.now();
     
-    if (score > 70) {
+    if (score > MATCH_THRESHOLD) {
+      console.log('Match detected with score:', score);
       lastMatchTime.current = currentTime;
       
       if (!showMatchVideo) {
+        console.log('Starting video playback');
         setShowMatchVideo(true);
         requestOrientationPermission();
+        
         if (matchVideoRef.current) {
           matchVideoRef.current.currentTime = 0;
-          matchVideoRef.current.play();
+          const playPromise = matchVideoRef.current.play();
+          if (playPromise !== undefined) {
+            playPromise.then(() => {
+              console.log('Video playing successfully');
+            }).catch(error => {
+              console.error('Error playing video:', error);
+            });
+          }
         }
       }
     } else if (showMatchVideo && (currentTime - lastMatchTime.current > MATCH_TIMEOUT)) {
+      console.log('Match lost, stopping video');
       setShowMatchVideo(false);
       if (matchVideoRef.current) {
         matchVideoRef.current.pause();
@@ -180,6 +210,7 @@ const ARImageMatcher = () => {
     }
   }, [showMatchVideo, requestOrientationPermission]);
 
+  // Capture and compare frames
   const captureFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current) return;
 
@@ -206,6 +237,7 @@ const ARImageMatcher = () => {
     };
   }, [compareImages, handleMatchState, referenceImage]);
 
+  // Setup capture interval
   useEffect(() => {
     let intervalId;
     if (isStreaming) {
@@ -218,20 +250,22 @@ const ARImageMatcher = () => {
     };
   }, [isStreaming, captureFrame]);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopCamera();
       window.removeEventListener('deviceorientation', handleOrientation);
     };
-  }, [handleOrientation]);
+  }, [handleOrientation, stopCamera]);
 
-  const getVideoStyle = () => {
+  // Get video style based on orientation
+  const getVideoStyle = useCallback(() => {
     if (!showMatchVideo) return {};
     
     const { alpha, beta, gamma } = orientation;
     return {
       position: 'absolute',
-      width: '50%',
+      width: '40%',
       height: 'auto',
       transform: `
         perspective(1000px)
@@ -241,9 +275,10 @@ const ARImageMatcher = () => {
         translate(-50%, -50%)
       `,
       transition: 'transform 0.1s ease-out',
-      zIndex: 20
+      zIndex: 20,
+      opacity: showMatchVideo ? 1 : 0
     };
-  };
+  }, [showMatchVideo, orientation]);
 
   return (
     <div style={{ 
@@ -265,21 +300,24 @@ const ARImageMatcher = () => {
         playsInline
       />
       
-      {showMatchVideo && (
-        <div style={{
-          position: 'absolute',
-          top: '50%',
-          left: '50%'
-        }}>
-          <video
-            ref={matchVideoRef}
-            src={matchVideo}
-            style={getVideoStyle()}
-            playsInline
-            loop
-          />
-        </div>
-      )}
+      <div style={{
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        pointerEvents: showMatchVideo ? 'auto' : 'none'
+      }}>
+        <video
+          ref={matchVideoRef}
+          src={matchVideo}
+          style={getVideoStyle()}
+          playsInline
+          loop
+          muted={false}
+          controls={false}
+          onError={(e) => console.error('Video error:', e)}
+          onPlay={() => console.log('Video play event triggered')}
+        />
+      </div>
 
       <canvas
         ref={canvasRef}
@@ -318,7 +356,10 @@ const ARImageMatcher = () => {
           borderRadius: '8px',
           zIndex: 30
         }}>
-          <h3 style={{ marginBottom: '8px' }}>Match Score: {matchScore.toFixed(1)}%</h3>
+          <h3 style={{ marginBottom: '8px' }}>
+            Match Score: {matchScore.toFixed(1)}%
+            {matchScore > MATCH_THRESHOLD && " - Match Detected!"}
+          </h3>
         </div>
       )}
     </div>
