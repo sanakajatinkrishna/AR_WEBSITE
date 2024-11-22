@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 
 const ARImageMatcher = () => {
-  // ... (previous state and ref declarations remain the same)
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const matchVideoRef = useRef(null);
@@ -17,7 +16,15 @@ const ARImageMatcher = () => {
   const referenceImage = require('./assets/images/reference.jpg');
   const matchVideo = require('./assets/videos/match.mp4');
 
-  // ... (previous utility functions remain the same)
+  useEffect(() => {
+    if (matchVideoRef.current) {
+      matchVideoRef.current.load();
+      matchVideoRef.current.muted = false;
+      matchVideoRef.current.setAttribute('playsinline', '');
+      matchVideoRef.current.setAttribute('webkit-playsinline', '');
+    }
+  }, []);
+
   const rgbToHsv = (r, g, b) => {
     r /= 255;
     g /= 255;
@@ -53,97 +60,77 @@ const ARImageMatcher = () => {
   const compareImages = useCallback((imgData1, imgData2) => {
     const width = imgData1.width;
     const height = imgData1.height;
-    const blockSize = 32;
-    const searchStep = 16; // Step size for searching
-    const regionSize = 96; // Size of the region to compare
+    const blockSize = 8;
+    const hueWeight = 0.5;
+    const satWeight = 0.3;
+    const valWeight = 0.2;
+    const hueTolerance = 30;
+    const satTolerance = 30;
+    const valTolerance = 30;
     
     let bestMatch = {
       score: 0,
-      x: 0,
-      y: 0
+      x: 50,
+      y: 50
     };
 
-    // Search through the image with overlapping regions
-    for (let y = 0; y <= height - regionSize; y += searchStep) {
-      for (let x = 0; x <= width - regionSize; x += searchStep) {
-        let regionScore = 0;
-        let totalPixels = 0;
+    for (let y = 0; y < height; y += blockSize) {
+      for (let x = 0; x < width; x += blockSize) {
+        let blockMatchSum = 0;
+        let blockPixels = 0;
 
-        // Compare blocks within the region
-        for (let by = 0; by < regionSize; by += blockSize) {
-          for (let bx = 0; bx < regionSize; bx += blockSize) {
-            let blockScore = 0;
-            let blockPixels = 0;
+        for (let by = 0; by < blockSize && y + by < height; by++) {
+          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+            const i = ((y + by) * width + (x + bx)) * 4;
+            
+            const r1 = imgData1.data[i];
+            const g1 = imgData1.data[i + 1];
+            const b1 = imgData1.data[i + 2];
+            
+            const r2 = imgData2.data[i];
+            const g2 = imgData2.data[i + 1];
+            const b2 = imgData2.data[i + 2];
 
-            // Compare pixels within each block
-            for (let py = 0; py < blockSize && (y + by + py) < height; py++) {
-              for (let px = 0; px < blockSize && (x + bx + px) < width; px++) {
-                const i = ((y + by + py) * width + (x + bx + px)) * 4;
-                
-                // Skip transparent pixels
-                if (imgData1.data[i + 3] < 128 || imgData2.data[i + 3] < 128) continue;
+            const hsv1 = rgbToHsv(r1, g1, b1);
+            const hsv2 = rgbToHsv(r2, g2, b2);
 
-                const r1 = imgData1.data[i];
-                const g1 = imgData1.data[i + 1];
-                const b1 = imgData1.data[i + 2];
-                
-                const r2 = imgData2.data[i];
-                const g2 = imgData2.data[i + 1];
-                const b2 = imgData2.data[i + 2];
+            const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
+            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
+            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
 
-                const hsv1 = rgbToHsv(r1, g1, b1);
-                const hsv2 = rgbToHsv(r2, g2, b2);
+            const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
+            const satMatch = satDiff <= satTolerance ? 1 : 0;
+            const valMatch = valDiff <= valTolerance ? 1 : 0;
 
-                // Calculate color differences
-                const hueDiff = Math.min(
-                  Math.abs(hsv1[0] - hsv2[0]),
-                  360 - Math.abs(hsv1[0] - hsv2[0])
-                ) / 180;
-                const satDiff = Math.abs(hsv1[1] - hsv2[1]) / 100;
-                const valDiff = Math.abs(hsv1[2] - hsv2[2]) / 100;
+            const pixelMatchScore = 
+              hueMatch * hueWeight +
+              satMatch * satWeight +
+              valMatch * valWeight;
 
-                // Weight the differences
-                const pixelScore = (
-                  (1 - hueDiff) * 0.4 +
-                  (1 - satDiff) * 0.3 +
-                  (1 - valDiff) * 0.3
-                );
-
-                blockScore += pixelScore;
-                blockPixels++;
-              }
-            }
-
-            if (blockPixels > 0) {
-              regionScore += blockScore / blockPixels;
-              totalPixels++;
-            }
+            blockMatchSum += pixelMatchScore;
+            blockPixels++;
           }
         }
 
-        // Calculate final score for this region
-        const normalizedScore = totalPixels > 0 
-          ? (regionScore / totalPixels) * 100 
-          : 0;
-
-        // Update best match if this region has a better score
-        if (normalizedScore > bestMatch.score) {
+        const blockScore = blockPixels > 0 ? (blockMatchSum / blockPixels) * 100 : 0;
+        
+        if (blockScore > bestMatch.score) {
           bestMatch = {
-            score: normalizedScore,
-            x: (x + regionSize/2) / width * 100,
-            y: (y + regionSize/2) / height * 100
+            score: blockScore,
+            x: (x / width) * 100,
+            y: (y / height) * 100
           };
         }
       }
     }
 
-    // Apply additional score normalization and constraints
-    bestMatch.score = Math.min(100, Math.max(0, bestMatch.score));
-    
-    return bestMatch;
+    return {
+      score: Math.min(100, bestMatch.score * 1.5),
+      x: bestMatch.x,
+      y: bestMatch.y
+    };
   }, []);
 
-  // ... (rest of the component implementation remains the same)
   const playUnmutedVideo = async () => {
     if (matchVideoRef.current) {
       try {
@@ -204,10 +191,11 @@ const ARImageMatcher = () => {
     if (matchResult.score > MATCH_THRESHOLD) {
       lastMatchTime.current = currentTime;
       
-      setMatchPosition({
-        x: matchResult.x,
-        y: matchResult.y
-      });
+      // Use relative positioning for smoother tracking
+      setMatchPosition(prev => ({
+        x: prev.x * 0.8 + matchResult.x * 0.2, // Apply smoothing
+        y: prev.y * 0.8 + matchResult.y * 0.2
+      }));
       
       if (!showMatchVideo) {
         setShowMatchVideo(true);
@@ -297,7 +285,7 @@ const ARImageMatcher = () => {
         aspectRatio: '16/9',
         opacity: showMatchVideo ? 1 : 0,
         visibility: showMatchVideo ? 'visible' : 'hidden',
-        transition: 'all 0.3s ease-out',
+        transition: 'all 0.15s ease-out', // Faster transition for better tracking
         backgroundColor: 'black',
         borderRadius: '12px',
         overflow: 'hidden',
