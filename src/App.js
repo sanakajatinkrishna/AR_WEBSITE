@@ -8,12 +8,12 @@ const ARImageMatcher = () => {
   const [matchScore, setMatchScore] = useState(null);
   const [showMatchVideo, setShowMatchVideo] = useState(false);
   const [orientation, setOrientation] = useState({ alpha: 0, beta: 0, gamma: 0 });
+  const lastMatchTime = useRef(0);
+  const MATCH_TIMEOUT = 500;
 
-  // Import reference image and match video
   const referenceImage = require('./assets/images/reference.jpg');
   const matchVideo = require('./assets/videos/match.mp4');
 
-  // Handle device orientation changes
   const handleOrientation = useCallback((event) => {
     setOrientation({
       alpha: event.alpha || 0,
@@ -22,7 +22,6 @@ const ARImageMatcher = () => {
     });
   }, []);
 
-  // Request device orientation permissions
   const requestOrientationPermission = useCallback(async () => {
     if (typeof DeviceOrientationEvent !== 'undefined' && 
         typeof DeviceOrientationEvent.requestPermission === 'function') {
@@ -39,7 +38,6 @@ const ARImageMatcher = () => {
     }
   }, [handleOrientation]);
 
-  // Start camera stream
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -58,7 +56,6 @@ const ARImageMatcher = () => {
     }
   };
 
-  // Stop camera stream
   const stopCamera = () => {
     if (videoRef.current && videoRef.current.srcObject) {
       videoRef.current.srcObject.getTracks().forEach(track => track.stop());
@@ -67,7 +64,6 @@ const ARImageMatcher = () => {
     }
   };
 
-  // Convert RGB to HSV
   const rgbToHsv = (r, g, b) => {
     r /= 255;
     g /= 255;
@@ -100,7 +96,6 @@ const ARImageMatcher = () => {
     return [h, s * 100, v * 100];
   };
 
-  // Compare images
   const compareImages = useCallback((imgData1, imgData2) => {
     const width = imgData1.width;
     const height = imgData1.height;
@@ -163,7 +158,28 @@ const ARImageMatcher = () => {
     return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
   }, []);
 
-  // Capture and compare frame
+  const handleMatchState = useCallback((score) => {
+    const currentTime = Date.now();
+    
+    if (score > 70) {
+      lastMatchTime.current = currentTime;
+      
+      if (!showMatchVideo) {
+        setShowMatchVideo(true);
+        requestOrientationPermission();
+        if (matchVideoRef.current) {
+          matchVideoRef.current.currentTime = 0;
+          matchVideoRef.current.play();
+        }
+      }
+    } else if (showMatchVideo && (currentTime - lastMatchTime.current > MATCH_TIMEOUT)) {
+      setShowMatchVideo(false);
+      if (matchVideoRef.current) {
+        matchVideoRef.current.pause();
+      }
+    }
+  }, [showMatchVideo, requestOrientationPermission]);
+
   const captureFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current) return;
 
@@ -186,27 +202,14 @@ const ARImageMatcher = () => {
       
       const score = compareImages(capturedFrame, referenceData);
       setMatchScore(score);
-
-      if (score > 70 && !showMatchVideo) {
-        setShowMatchVideo(true);
-        requestOrientationPermission();
-        if (matchVideoRef.current) {
-          matchVideoRef.current.play();
-        }
-      }
+      handleMatchState(score);
     };
-  }, [compareImages, referenceImage, showMatchVideo, requestOrientationPermission]);
-
-  // Handle video end
-  const handleVideoEnd = () => {
-    setShowMatchVideo(false);
-    window.removeEventListener('deviceorientation', handleOrientation);
-  };
+  }, [compareImages, handleMatchState, referenceImage]);
 
   useEffect(() => {
     let intervalId;
     if (isStreaming) {
-      intervalId = setInterval(captureFrame, 500);
+      intervalId = setInterval(captureFrame, 100);
     }
     return () => {
       if (intervalId) {
@@ -222,17 +225,24 @@ const ARImageMatcher = () => {
     };
   }, [handleOrientation]);
 
-  // Calculate 3D transform based on device orientation
-  const getVideoTransform = () => {
-    if (!showMatchVideo) return '';
+  const getVideoStyle = () => {
+    if (!showMatchVideo) return {};
     
     const { alpha, beta, gamma } = orientation;
-    return `
-      perspective(1000px)
-      rotateX(${-beta}deg)
-      rotateY(${gamma}deg)
-      rotateZ(${alpha}deg)
-    `;
+    return {
+      position: 'absolute',
+      width: '50%',
+      height: 'auto',
+      transform: `
+        perspective(1000px)
+        rotateX(${-beta}deg)
+        rotateY(${gamma}deg)
+        rotateZ(${alpha}deg)
+        translate(-50%, -50%)
+      `,
+      transition: 'transform 0.1s ease-out',
+      zIndex: 20
+    };
   };
 
   return (
@@ -244,83 +254,72 @@ const ARImageMatcher = () => {
       height: '100%',
       overflow: 'hidden'
     }}>
-      {showMatchVideo ? (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
+      <video
+        ref={videoRef}
+        style={{
           width: '100%',
           height: '100%',
-          backgroundColor: 'transparent',
-          perspective: '1000px'
+          objectFit: 'cover'
+        }}
+        autoPlay
+        playsInline
+      />
+      
+      {showMatchVideo && (
+        <div style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%'
         }}>
           <video
             ref={matchVideoRef}
             src={matchVideo}
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              transform: getVideoTransform(),
-              transition: 'transform 0.1s ease-out'
-            }}
-            onEnded={handleVideoEnd}
+            style={getVideoStyle()}
             playsInline
+            loop
           />
         </div>
-      ) : (
-        <>
-          <video
-            ref={videoRef}
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover'
-            }}
-            autoPlay
-            playsInline
-          />
-          <canvas
-            ref={canvasRef}
-            style={{ display: 'none' }}
-          />
-          
-          <div style={{
-            position: 'fixed',
-            top: '20px',
-            left: '20px',
-            zIndex: 10
-          }}>
-            <button
-              onClick={isStreaming ? stopCamera : startCamera}
-              style={{
-                padding: '8px 16px',
-                backgroundColor: isStreaming ? '#dc2626' : '#2563eb',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer'
-              }}
-            >
-              {isStreaming ? "Stop Camera" : "Start Camera"}
-            </button>
-          </div>
+      )}
 
-          {matchScore !== null && (
-            <div style={{
-              position: 'fixed',
-              bottom: '20px',
-              left: '20px',
-              right: '20px',
-              padding: '16px',
-              backgroundColor: 'rgba(243, 244, 246, 0.8)',
-              borderRadius: '8px',
-              zIndex: 10
-            }}>
-              <h3 style={{ marginBottom: '8px' }}>Match Score: {matchScore.toFixed(1)}%</h3>
-            </div>
-          )}
-        </>
+      <canvas
+        ref={canvasRef}
+        style={{ display: 'none' }}
+      />
+      
+      <div style={{
+        position: 'fixed',
+        top: '20px',
+        left: '20px',
+        zIndex: 30
+      }}>
+        <button
+          onClick={isStreaming ? stopCamera : startCamera}
+          style={{
+            padding: '8px 16px',
+            backgroundColor: isStreaming ? '#dc2626' : '#2563eb',
+            color: 'white',
+            border: 'none',
+            borderRadius: '4px',
+            cursor: 'pointer'
+          }}
+        >
+          {isStreaming ? "Stop Camera" : "Start Camera"}
+        </button>
+      </div>
+
+      {matchScore !== null && (
+        <div style={{
+          position: 'fixed',
+          bottom: '20px',
+          left: '20px',
+          right: '20px',
+          padding: '16px',
+          backgroundColor: 'rgba(243, 244, 246, 0.8)',
+          borderRadius: '8px',
+          zIndex: 30
+        }}>
+          <h3 style={{ marginBottom: '8px' }}>Match Score: {matchScore.toFixed(1)}%</h3>
+        </div>
       )}
     </div>
   );
