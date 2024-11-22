@@ -1,14 +1,43 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 
-const ImageMatcher = () => {
+const ARImageMatcher = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const matchVideoRef = useRef(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(null);
-  const [error, setError] = useState(null);
+  const [showMatchVideo, setShowMatchVideo] = useState(false);
+  const [orientation, setOrientation] = useState({ alpha: 0, beta: 0, gamma: 0 });
 
-  // Import reference image
+  // Import reference image and match video
   const referenceImage = require('./assets/images/reference.jpg');
+  const matchVideo = require('./assets/videos/match.mp4');
+
+  // Handle device orientation changes
+  const handleOrientation = useCallback((event) => {
+    setOrientation({
+      alpha: event.alpha || 0,
+      beta: event.beta || 0,
+      gamma: event.gamma || 0
+    });
+  }, []);
+
+  // Request device orientation permissions
+  const requestOrientationPermission = useCallback(async () => {
+    if (typeof DeviceOrientationEvent !== 'undefined' && 
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        const permissionState = await DeviceOrientationEvent.requestPermission();
+        if (permissionState === 'granted') {
+          window.addEventListener('deviceorientation', handleOrientation);
+        }
+      } catch (err) {
+        console.error('Error requesting orientation permission:', err);
+      }
+    } else {
+      window.addEventListener('deviceorientation', handleOrientation);
+    }
+  }, [handleOrientation]);
 
   // Start camera stream
   const startCamera = async () => {
@@ -23,10 +52,8 @@ const ImageMatcher = () => {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         setIsStreaming(true);
-        setError(null);
       }
     } catch (err) {
-      setError('Unable to access camera. Please ensure you have granted camera permissions.');
       console.error('Error accessing camera:', err);
     }
   };
@@ -40,7 +67,7 @@ const ImageMatcher = () => {
     }
   };
 
-  // Convert RGB to HSV for better comparison
+  // Convert RGB to HSV
   const rgbToHsv = (r, g, b) => {
     r /= 255;
     g /= 255;
@@ -73,33 +100,30 @@ const ImageMatcher = () => {
     return [h, s * 100, v * 100];
   };
 
-  // Compare images using HSV color space and regional comparison
+  // Compare images
   const compareImages = useCallback((imgData1, imgData2) => {
     const width = imgData1.width;
     const height = imgData1.height;
-    const blockSize = 8; // Compare blocks of pixels instead of individual pixels
+    const blockSize = 8;
     const hueWeight = 0.5;
     const satWeight = 0.3;
     const valWeight = 0.2;
-    const hueTolerance = 30; // Degrees
-    const satTolerance = 30; // Percent
-    const valTolerance = 30; // Percent
+    const hueTolerance = 30;
+    const satTolerance = 30;
+    const valTolerance = 30;
     
     let matchCount = 0;
     let totalBlocks = 0;
 
-    // Compare blocks of pixels
     for (let y = 0; y < height; y += blockSize) {
       for (let x = 0; x < width; x += blockSize) {
         let blockMatchSum = 0;
         let blockPixels = 0;
 
-        // Compare pixels within each block
         for (let by = 0; by < blockSize && y + by < height; by++) {
           for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
             const i = ((y + by) * width + (x + bx)) * 4;
             
-            // Get RGB values
             const r1 = imgData1.data[i];
             const g1 = imgData1.data[i + 1];
             const b1 = imgData1.data[i + 2];
@@ -108,16 +132,13 @@ const ImageMatcher = () => {
             const g2 = imgData2.data[i + 1];
             const b2 = imgData2.data[i + 2];
 
-            // Convert to HSV
             const hsv1 = rgbToHsv(r1, g1, b1);
             const hsv2 = rgbToHsv(r2, g2, b2);
 
-            // Compare HSV values with weighted importance
             const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
             const satDiff = Math.abs(hsv1[1] - hsv2[1]);
             const valDiff = Math.abs(hsv1[2] - hsv2[2]);
 
-            // Calculate match score for this pixel
             const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
             const satMatch = satDiff <= satTolerance ? 1 : 0;
             const valMatch = valDiff <= valTolerance ? 1 : 0;
@@ -132,7 +153,6 @@ const ImageMatcher = () => {
           }
         }
 
-        // If block has a good average match, count it
         if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
           matchCount++;
         }
@@ -140,11 +160,7 @@ const ImageMatcher = () => {
       }
     }
 
-    // Calculate final percentage with increased sensitivity
-    const rawPercentage = (matchCount / totalBlocks) * 100;
-    
-    // Apply a curve to increase sensitivity in the middle range
-    return Math.min(100, rawPercentage * 1.5);
+    return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
   }, []);
 
   // Capture and compare frame
@@ -155,33 +171,38 @@ const ImageMatcher = () => {
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
 
-    // Set canvas dimensions to match video
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-
-    // Draw current video frame
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    
-    // Get image data from canvas
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
-    // Load reference image
     const refImg = new Image();
     refImg.src = referenceImage;
     
     refImg.onload = () => {
-      // Clear canvas and draw reference image
       context.clearRect(0, 0, canvas.width, canvas.height);
       context.drawImage(refImg, 0, 0, canvas.width, canvas.height);
       const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
       
-      // Compare images and update score
       const score = compareImages(capturedFrame, referenceData);
       setMatchScore(score);
-    };
-  }, [compareImages, referenceImage]);
 
-  // Set up continuous comparison when streaming is active
+      if (score > 70 && !showMatchVideo) {
+        setShowMatchVideo(true);
+        requestOrientationPermission();
+        if (matchVideoRef.current) {
+          matchVideoRef.current.play();
+        }
+      }
+    };
+  }, [compareImages, referenceImage, showMatchVideo, requestOrientationPermission]);
+
+  // Handle video end
+  const handleVideoEnd = () => {
+    setShowMatchVideo(false);
+    window.removeEventListener('deviceorientation', handleOrientation);
+  };
+
   useEffect(() => {
     let intervalId;
     if (isStreaming) {
@@ -194,105 +215,115 @@ const ImageMatcher = () => {
     };
   }, [isStreaming, captureFrame]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopCamera();
+      window.removeEventListener('deviceorientation', handleOrientation);
     };
-  }, []);
+  }, [handleOrientation]);
+
+  // Calculate 3D transform based on device orientation
+  const getVideoTransform = () => {
+    if (!showMatchVideo) return '';
+    
+    const { alpha, beta, gamma } = orientation;
+    return `
+      perspective(1000px)
+      rotateX(${-beta}deg)
+      rotateY(${gamma}deg)
+      rotateZ(${alpha}deg)
+    `;
+  };
 
   return (
-    <div style={{ maxWidth: '800px', margin: '0 auto', padding: '20px' }}>
-      <div style={{ marginBottom: '20px' }}>
-        <h1 style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          Image Matcher
-        </h1>
-      </div>
-
-      <div>
-        {error && (
-          <div style={{ 
-            padding: '10px', 
-            backgroundColor: '#fee2e2', 
-            color: '#dc2626', 
-            borderRadius: '4px',
-            marginBottom: '20px' 
-          }}>
-            {error}
-          </div>
-        )}
-        
-        <div style={{ 
-          display: 'grid', 
-          gridTemplateColumns: '1fr 1fr', 
-          gap: '20px',
-          marginBottom: '20px'
+    <div style={{ 
+      position: 'fixed',
+      top: 0,
+      left: 0,
+      width: '100%',
+      height: '100%',
+      overflow: 'hidden'
+    }}>
+      {showMatchVideo ? (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          backgroundColor: 'transparent',
+          perspective: '1000px'
         }}>
-          <div style={{ 
-            aspectRatio: '16/9',
-            backgroundColor: '#f3f4f6',
-            borderRadius: '8px',
-            overflow: 'hidden'
-          }}>
-            <img 
-              src={referenceImage}
-              alt="Reference"
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-            />
-            <p style={{ textAlign: 'center', marginTop: '8px' }}>Reference Image</p>
-          </div>
-          <div style={{ 
-            aspectRatio: '16/9',
-            backgroundColor: '#f3f4f6',
-            borderRadius: '8px',
-            overflow: 'hidden'
-          }}>
-            <video
-              ref={videoRef}
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              autoPlay
-              playsInline
-            />
-            <canvas
-              ref={canvasRef}
-              style={{ display: 'none' }}
-            />
-            <p style={{ textAlign: 'center', marginTop: '8px' }}>Camera Feed</p>
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
-          <button
-            onClick={isStreaming ? stopCamera : startCamera}
+          <video
+            ref={matchVideoRef}
+            src={matchVideo}
             style={{
-              padding: '8px 16px',
-              backgroundColor: isStreaming ? '#dc2626' : '#2563eb',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer'
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              transform: getVideoTransform(),
+              transition: 'transform 0.1s ease-out'
             }}
-          >
-            {isStreaming ? "Stop Camera" : "Start Camera"}
-          </button>
+            onEnded={handleVideoEnd}
+            playsInline
+          />
         </div>
-
-        {matchScore !== null && (
-          <div style={{ 
-            padding: '16px', 
-            backgroundColor: '#f3f4f6',
-            borderRadius: '8px'
+      ) : (
+        <>
+          <video
+            ref={videoRef}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover'
+            }}
+            autoPlay
+            playsInline
+          />
+          <canvas
+            ref={canvasRef}
+            style={{ display: 'none' }}
+          />
+          
+          <div style={{
+            position: 'fixed',
+            top: '20px',
+            left: '20px',
+            zIndex: 10
           }}>
-            <h3 style={{ marginBottom: '8px' }}>Match Score: {matchScore.toFixed(1)}%</h3>
-            <p style={{ color: '#4b5563' }}>
-              {matchScore > 70 ? "It's a match!" : 
-               matchScore > 40 ? "Partial match" : "No match found"}
-            </p>
+            <button
+              onClick={isStreaming ? stopCamera : startCamera}
+              style={{
+                padding: '8px 16px',
+                backgroundColor: isStreaming ? '#dc2626' : '#2563eb',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer'
+              }}
+            >
+              {isStreaming ? "Stop Camera" : "Start Camera"}
+            </button>
           </div>
-        )}
-      </div>
+
+          {matchScore !== null && (
+            <div style={{
+              position: 'fixed',
+              bottom: '20px',
+              left: '20px',
+              right: '20px',
+              padding: '16px',
+              backgroundColor: 'rgba(243, 244, 246, 0.8)',
+              borderRadius: '8px',
+              zIndex: 10
+            }}>
+              <h3 style={{ marginBottom: '8px' }}>Match Score: {matchScore.toFixed(1)}%</h3>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 };
 
-export default ImageMatcher;
+export default ARImageMatcher;
