@@ -1,5 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
-import * as tf from '@tensorflow/tfjs';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Camera } from 'lucide-react';
 
 const ARMatcher = () => {
@@ -8,122 +7,165 @@ const ARMatcher = () => {
   const overlayVideoRef = useRef(null);
   const [isMatched, setIsMatched] = useState(false);
   const [matchPosition, setMatchPosition] = useState({ x: 0, y: 0 });
-  const [cameraError, setCameraError] = useState(null);
-  const [hasCameraPermission, setHasCameraPermission] = useState(false);
 
-  const requestCameraPermission = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        } 
-      });
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        setHasCameraPermission(true);
-        setCameraError(null);
+  const rgbToHsv = (r, g, b) => {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const diff = max - min;
+    
+    let h = 0;
+    let s = max === 0 ? 0 : diff / max;
+    let v = max;
+
+    if (diff !== 0) {
+      switch (max) {
+        case r: h = 60 * ((g - b) / diff + (g < b ? 6 : 0)); break;
+        case g: h = 60 * ((b - r) / diff + 2); break;
+        case b: h = 60 * ((r - g) / diff + 4); break;
+        default : h =0; break;
       }
-      return stream;
-    } catch (err) {
-      console.error("Camera permission error:", err);
-      setCameraError(err.message);
-      setHasCameraPermission(false);
-      return null;
     }
+    return [h, s * 100, v * 100];
   };
+
+  const compareImages = useCallback((imgData1, imgData2) => {
+    const width = imgData1.width;
+    const height = imgData1.height;
+    const blockSize = 8;
+    const hueWeight = 0.5;
+    const satWeight = 0.3;
+    const valWeight = 0.2;
+    const hueTolerance = 30;
+    const satTolerance = 30;
+    const valTolerance = 30;
+    
+    let matchCount = 0;
+    let totalBlocks = 0;
+
+    for (let y = 0; y < height; y += blockSize) {
+      for (let x = 0; x < width; x += blockSize) {
+        let blockMatchSum = 0;
+        let blockPixels = 0;
+
+        for (let by = 0; by < blockSize && y + by < height; by++) {
+          for (let bx = 0; bx < blockSize && x + bx < width; bx++) {
+            const i = ((y + by) * width + (x + bx)) * 4;
+            
+            const r1 = imgData1.data[i];
+            const g1 = imgData1.data[i + 1];
+            const b1 = imgData1.data[i + 2];
+            
+            const r2 = imgData2.data[i];
+            const g2 = imgData2.data[i + 1];
+            const b2 = imgData2.data[i + 2];
+
+            const hsv1 = rgbToHsv(r1, g1, b1);
+            const hsv2 = rgbToHsv(r2, g2, b2);
+
+            const hueDiff = Math.abs(hsv1[0] - hsv2[0]);
+            const satDiff = Math.abs(hsv1[1] - hsv2[1]);
+            const valDiff = Math.abs(hsv1[2] - hsv2[2]);
+
+            const hueMatch = (hueDiff <= hueTolerance || hueDiff >= 360 - hueTolerance) ? 1 : 0;
+            const satMatch = satDiff <= satTolerance ? 1 : 0;
+            const valMatch = valDiff <= valTolerance ? 1 : 0;
+
+            const pixelMatchScore = 
+              hueMatch * hueWeight +
+              satMatch * satWeight +
+              valMatch * valWeight;
+
+            blockMatchSum += pixelMatchScore;
+            blockPixels++;
+          }
+        }
+
+        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
+          matchCount++;
+        }
+        totalBlocks++;
+      }
+    }
+
+    return (matchCount / totalBlocks) * 100 * 1.5;
+  }, []);
+
+  const processFrame = useCallback(() => {
+    if (!videoRef.current || !canvasRef.current) return;
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas.getContext('2d');
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
+
+    const refImg = new Image();
+    refImg.src = '/assets/model/model.jpg';
+    
+    refImg.onload = () => {
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(refImg, 0, 0, canvas.width, canvas.height);
+      const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
+      
+      const score = compareImages(capturedFrame, referenceData);
+      const matched = score > 70;
+
+      if (matched) {
+        const rect = video.getBoundingClientRect();
+        setMatchPosition({
+          x: rect.width / 2,
+          y: rect.height / 2
+        });
+        setIsMatched(true);
+        if (overlayVideoRef.current?.paused) {
+          overlayVideoRef.current.play().catch(console.error);
+        }
+      } else {
+        setIsMatched(false);
+        overlayVideoRef.current?.pause();
+      }
+    };
+
+    requestAnimationFrame(processFrame);
+  }, [compareImages]);
 
   useEffect(() => {
     let stream = null;
-    let referenceImage = null;
 
-    const loadReferenceImage = async () => {
-      const img = new Image();
-      img.src = '/assets/model/model.jpg';
-      await img.decode();
-      referenceImage = tf.browser.fromPixels(img)
-        .resizeBilinear([224, 224])
-        .toFloat()
-        .div(255.0);
-    };
-
-    const detectImage = async (videoElement) => {
-      if (!referenceImage || !videoElement) return false;
-
-      const videoTensor = tf.browser.fromPixels(videoElement)
-        .resizeBilinear([224, 224])
-        .toFloat()
-        .div(255.0);
-
-      const similarity = tf.metrics.cosineProximity(
-        referenceImage.reshape([-1]),
-        videoTensor.reshape([-1])
-      ).dataSync()[0];
-
-      videoTensor.dispose();
-      return similarity > 0.8;
-    };
-
-    const processFrame = async () => {
-      if (videoRef.current && hasCameraPermission) {
-        const matched = await detectImage(videoRef.current);
-        if (matched) {
-          const rect = videoRef.current.getBoundingClientRect();
-          setMatchPosition({
-            x: rect.width / 2,
-            y: rect.height / 2
-          });
-          setIsMatched(true);
-          if (overlayVideoRef.current?.paused) {
-            overlayVideoRef.current.play().catch(console.error);
-          }
-        } else {
-          setIsMatched(false);
-          overlayVideoRef.current?.pause();
+    const initCamera = async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
+            facingMode: 'environment',
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          } 
+        });
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          processFrame();
         }
+      } catch (err) {
+        console.error("Camera error:", err);
       }
-      requestAnimationFrame(processFrame);
     };
 
-    const init = async () => {
-      await loadReferenceImage();
-      stream = await requestCameraPermission();
-      if (stream) processFrame();
-    };
-
-    init();
+    initCamera();
 
     return () => {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
-      if (referenceImage) {
-        referenceImage.dispose();
-      }
     };
-  }, [hasCameraPermission]);
+  }, [processFrame]);
 
   return (
     <div className="relative w-full h-screen bg-black">
-      {!hasCameraPermission && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/90">
-          <div className="text-center p-4">
-            <h2 className="text-white text-xl mb-4">Camera Access Required</h2>
-            <button 
-              onClick={requestCameraPermission}
-              className="bg-blue-500 text-white px-4 py-2 rounded-lg"
-            >
-              Enable Camera
-            </button>
-            {cameraError && (
-              <p className="text-red-400 mt-2 text-sm">{cameraError}</p>
-            )}
-          </div>
-        </div>
-      )}
-
       <video 
         ref={videoRef}
         autoPlay 
