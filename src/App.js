@@ -9,7 +9,7 @@ const ARImageMatcher = () => {
   const [showMatchVideo, setShowMatchVideo] = useState(false);
   const lastMatchTime = useRef(0);
   const MATCH_TIMEOUT = 300; // Reduced timeout for faster response
-  const MATCH_THRESHOLD = 80;
+  const MATCH_THRESHOLD = 70;
 
   const referenceImage = require('./assets/images/reference.jpg');
   const matchVideo = require('./assets/videos/match.mp4');
