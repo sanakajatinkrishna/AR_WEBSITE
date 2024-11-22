@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 
-const ARImageMatcher = () => {
+const MultiARImageMatcher = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const matchVideoRef = useRef(null);
@@ -8,12 +8,27 @@ const ARImageMatcher = () => {
   const [matchScore, setMatchScore] = useState(null);
   const [showMatchVideo, setShowMatchVideo] = useState(false);
   const [hasUserInteraction, setHasUserInteraction] = useState(false);
+  const [currentMatch, setCurrentMatch] = useState(null);
   const lastMatchTime = useRef(0);
   const MATCH_TIMEOUT = 300;
   const MATCH_THRESHOLD = 70;
 
-  const referenceImage = require('./assets/images/reference.jpg');
-  const matchVideo = require('./assets/videos/match.mp4');
+  // Move contentPairs into useMemo to prevent unnecessary recreations
+  const contentPairs = useMemo(() => [
+    {
+      id: '1',
+      referenceImage: './assets/images/reference1.jpg',
+      matchVideo: './assets/videos/match1.mp4',
+      title: 'Match 1'
+    },
+    {
+      id: '2',
+      referenceImage: './assets/images/reference2.jpg',
+      matchVideo: './assets/videos/match2.mp4',
+      title: 'Match 2'
+    },
+    // Add more pairs as needed
+  ], []); // Empty dependency array since this data is static
 
   useEffect(() => {
     if (matchVideoRef.current) {
@@ -22,9 +37,9 @@ const ARImageMatcher = () => {
       matchVideoRef.current.setAttribute('playsinline', '');
       matchVideoRef.current.setAttribute('webkit-playsinline', '');
     }
-  }, []);
+  }, [currentMatch]);
 
-  const rgbToHsv = (r, g, b) => {
+  const rgbToHsv = useCallback((r, g, b) => {
     r /= 255;
     g /= 255;
     b /= 255;
@@ -54,7 +69,7 @@ const ARImageMatcher = () => {
     }
 
     return [h, s * 100, v * 100];
-  };
+  }, []);
 
   const compareImages = useCallback((imgData1, imgData2) => {
     const width = imgData1.width;
@@ -116,28 +131,49 @@ const ARImageMatcher = () => {
     }
 
     return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
-  }, []);
+  }, [rgbToHsv]);
 
-  const playUnmutedVideo = async () => {
+  const findBestMatch = useCallback((capturedFrame, context) => {
+    let bestMatch = null;
+    let bestScore = 0;
+
+    for (const pair of contentPairs) {
+      const refImg = new Image();
+      refImg.src = pair.referenceImage;
+      
+      context.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+      context.drawImage(refImg, 0, 0, canvasRef.current.width, canvasRef.current.height);
+      const referenceData = context.getImageData(0, 0, canvasRef.current.width, canvasRef.current.height);
+      
+      const score = compareImages(capturedFrame, referenceData);
+      
+      if (score > MATCH_THRESHOLD && score > bestScore) {
+        bestScore = score;
+        bestMatch = { ...pair, score };
+      }
+    }
+
+    return bestMatch;
+  }, [compareImages, contentPairs, MATCH_THRESHOLD]);
+
+  const playUnmutedVideo = useCallback(async () => {
     if (matchVideoRef.current) {
       try {
         matchVideoRef.current.volume = 1;
         matchVideoRef.current.muted = false;
         await matchVideoRef.current.play();
-        console.log('Video playing with sound');
       } catch (error) {
         console.error('Error playing video:', error);
         try {
           matchVideoRef.current.muted = true;
           await matchVideoRef.current.play();
           matchVideoRef.current.muted = false;
-          console.log('Video playing after fallback');
         } catch (fallbackError) {
           console.error('Fallback playback failed:', fallbackError);
         }
       }
     }
-  };
+  }, []);
 
   const handleUserInteraction = async () => {
     setHasUserInteraction(true);
@@ -168,23 +204,25 @@ const ARImageMatcher = () => {
       videoRef.current.srcObject = null;
       setIsStreaming(false);
       setShowMatchVideo(false);
+      setCurrentMatch(null);
       if (matchVideoRef.current) {
         matchVideoRef.current.pause();
       }
     }
   }, []);
 
-  const handleMatchState = useCallback((score) => {
+  const handleMatchState = useCallback((matchData) => {
     const currentTime = Date.now();
     
-    if (score > MATCH_THRESHOLD) {
-      console.log('Match detected with score:', score);
+    if (matchData) {
+      console.log('Match detected:', matchData.title, 'with score:', matchData.score);
       lastMatchTime.current = currentTime;
       
-      if (!showMatchVideo) {
-        console.log('Starting video playback');
+      if (!showMatchVideo || currentMatch?.id !== matchData.id) {
+        setCurrentMatch(matchData);
         setShowMatchVideo(true);
         if (matchVideoRef.current) {
+          matchVideoRef.current.src = matchData.matchVideo;
           matchVideoRef.current.currentTime = 0;
           playUnmutedVideo();
         }
@@ -192,11 +230,12 @@ const ARImageMatcher = () => {
     } else if (showMatchVideo && (currentTime - lastMatchTime.current > MATCH_TIMEOUT)) {
       console.log('Match lost, stopping video');
       setShowMatchVideo(false);
+      setCurrentMatch(null);
       if (matchVideoRef.current) {
         matchVideoRef.current.pause();
       }
     }
-  }, [showMatchVideo]);
+  }, [showMatchVideo, currentMatch, playUnmutedVideo, MATCH_TIMEOUT]);
 
   const captureFrame = useCallback(() => {
     if (!videoRef.current || !canvasRef.current) return;
@@ -210,19 +249,10 @@ const ARImageMatcher = () => {
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const capturedFrame = context.getImageData(0, 0, canvas.width, canvas.height);
 
-    const refImg = new Image();
-    refImg.src = referenceImage;
-    
-    refImg.onload = () => {
-      context.clearRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(refImg, 0, 0, canvas.width, canvas.height);
-      const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
-      
-      const score = compareImages(capturedFrame, referenceData);
-      setMatchScore(score);
-      handleMatchState(score);
-    };
-  }, [compareImages, handleMatchState, referenceImage]);
+    const bestMatch = findBestMatch(capturedFrame, context);
+    setMatchScore(bestMatch?.score || 0);
+    handleMatchState(bestMatch);
+  }, [findBestMatch, handleMatchState]);
 
   useEffect(() => {
     let intervalId;
@@ -280,7 +310,6 @@ const ARImageMatcher = () => {
       }}>
         <video
           ref={matchVideoRef}
-          src={matchVideo}
           style={{
             width: '100%',
             height: '100%',
@@ -291,10 +320,6 @@ const ARImageMatcher = () => {
           controls={false}
           muted={false}
           autoPlay={false}
-          onError={(e) => console.error('Video error:', e)}
-          onPlay={() => console.log('Video started playing')}
-          onPlaying={() => console.log('Video is playing')}
-          onPause={() => console.log('Video paused')}
         />
       </div>
 
@@ -325,7 +350,7 @@ const ARImageMatcher = () => {
         </button>
       </div>
 
-      {matchScore !== null && (
+      {matchScore !== null && currentMatch && (
         <div style={{
           position: 'fixed',
           bottom: '20px',
@@ -337,7 +362,7 @@ const ARImageMatcher = () => {
           zIndex: 30
         }}>
           <h3 style={{ margin: 0, textAlign: 'center', fontSize: '1.2rem' }}>
-            Match Score: {matchScore.toFixed(1)}%
+            {currentMatch.title}: {matchScore.toFixed(1)}%
             {matchScore > MATCH_THRESHOLD && 
               <span style={{ color: '#059669' }}> - Match Detected!</span>
             }
@@ -348,4 +373,4 @@ const ARImageMatcher = () => {
   );
 };
 
-export default ARImageMatcher;
+export default MultiARImageMatcher;
