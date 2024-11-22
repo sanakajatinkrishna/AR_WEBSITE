@@ -7,7 +7,6 @@ const ARImageMatcher = () => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(null);
   const [showMatchVideo, setShowMatchVideo] = useState(false);
-  const [matchPosition, setMatchPosition] = useState({ x: 50, y: 50 }); // Center by default
   const [hasUserInteraction, setHasUserInteraction] = useState(false);
   const lastMatchTime = useRef(0);
   const MATCH_TIMEOUT = 300;
@@ -60,7 +59,7 @@ const ARImageMatcher = () => {
   const compareImages = useCallback((imgData1, imgData2) => {
     const width = imgData1.width;
     const height = imgData1.height;
-    const blockSize = 32; // Increased block size for faster processing
+    const blockSize = 8;
     const hueWeight = 0.5;
     const satWeight = 0.3;
     const valWeight = 0.2;
@@ -68,11 +67,8 @@ const ARImageMatcher = () => {
     const satTolerance = 30;
     const valTolerance = 30;
     
-    let bestMatch = {
-      score: 0,
-      x: 0,
-      y: 0
-    };
+    let matchCount = 0;
+    let totalBlocks = 0;
 
     for (let y = 0; y < height; y += blockSize) {
       for (let x = 0; x < width; x += blockSize) {
@@ -112,19 +108,14 @@ const ARImageMatcher = () => {
           }
         }
 
-        const blockScore = blockPixels > 0 ? (blockMatchSum / blockPixels) * 100 : 0;
-        
-        if (blockScore > bestMatch.score) {
-          bestMatch = {
-            score: blockScore,
-            x: (x / width) * 100,
-            y: (y / height) * 100
-          };
+        if (blockPixels > 0 && (blockMatchSum / blockPixels) > 0.6) {
+          matchCount++;
         }
+        totalBlocks++;
       }
     }
 
-    return bestMatch;
+    return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
   }, []);
 
   const playUnmutedVideo = async () => {
@@ -133,12 +124,14 @@ const ARImageMatcher = () => {
         matchVideoRef.current.volume = 1;
         matchVideoRef.current.muted = false;
         await matchVideoRef.current.play();
+        console.log('Video playing with sound');
       } catch (error) {
         console.error('Error playing video:', error);
         try {
           matchVideoRef.current.muted = true;
           await matchVideoRef.current.play();
           matchVideoRef.current.muted = false;
+          console.log('Video playing after fallback');
         } catch (fallbackError) {
           console.error('Fallback playback failed:', fallbackError);
         }
@@ -181,20 +174,15 @@ const ARImageMatcher = () => {
     }
   }, []);
 
-  const handleMatchState = useCallback((matchResult) => {
+  const handleMatchState = useCallback((score) => {
     const currentTime = Date.now();
     
-    if (matchResult.score > MATCH_THRESHOLD) {
-      console.log('Match detected with score:', matchResult.score, 'at position:', matchResult.x, matchResult.y);
+    if (score > MATCH_THRESHOLD) {
+      console.log('Match detected with score:', score);
       lastMatchTime.current = currentTime;
       
-      // Update position with smooth transition
-      setMatchPosition({
-        x: matchResult.x,
-        y: matchResult.y
-      });
-      
       if (!showMatchVideo) {
+        console.log('Starting video playback');
         setShowMatchVideo(true);
         if (matchVideoRef.current) {
           matchVideoRef.current.currentTime = 0;
@@ -202,6 +190,7 @@ const ARImageMatcher = () => {
         }
       }
     } else if (showMatchVideo && (currentTime - lastMatchTime.current > MATCH_TIMEOUT)) {
+      console.log('Match lost, stopping video');
       setShowMatchVideo(false);
       if (matchVideoRef.current) {
         matchVideoRef.current.pause();
@@ -229,9 +218,9 @@ const ARImageMatcher = () => {
       context.drawImage(refImg, 0, 0, canvas.width, canvas.height);
       const referenceData = context.getImageData(0, 0, canvas.width, canvas.height);
       
-      const matchResult = compareImages(capturedFrame, referenceData);
-      setMatchScore(matchResult.score);
-      handleMatchState(matchResult);
+      const score = compareImages(capturedFrame, referenceData);
+      setMatchScore(score);
+      handleMatchState(score);
     };
   }, [compareImages, handleMatchState, referenceImage]);
 
@@ -275,14 +264,14 @@ const ARImageMatcher = () => {
       
       <div style={{
         position: 'fixed',
-        top: `${matchPosition.y}%`,
-        left: `${matchPosition.x}%`,
+        top: '50%',
+        left: '50%',
         transform: 'translate(-50%, -50%)',
         width: '25%',
         aspectRatio: '16/9',
         opacity: showMatchVideo ? 1 : 0,
         visibility: showMatchVideo ? 'visible' : 'hidden',
-        transition: 'all 0.3s ease-out',
+        transition: 'opacity 0.3s ease-in-out, visibility 0.3s ease-in-out',
         backgroundColor: 'black',
         borderRadius: '12px',
         overflow: 'hidden',
@@ -302,6 +291,10 @@ const ARImageMatcher = () => {
           controls={false}
           muted={false}
           autoPlay={false}
+          onError={(e) => console.error('Video error:', e)}
+          onPlay={() => console.log('Video started playing')}
+          onPlaying={() => console.log('Video is playing')}
+          onPause={() => console.log('Video paused')}
         />
       </div>
 
