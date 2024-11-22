@@ -7,7 +7,7 @@ const ARImageMatcher = () => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(null);
   const [showMatchVideo, setShowMatchVideo] = useState(false);
-  const [matchPosition, setMatchPosition] = useState({ x: 50, y: 50 });
+  const [matchPosition, setMatchPosition] = useState({ x: 50, y: 50 }); // Center by default
   const [hasUserInteraction, setHasUserInteraction] = useState(false);
   const lastMatchTime = useRef(0);
   const MATCH_TIMEOUT = 300;
@@ -60,7 +60,7 @@ const ARImageMatcher = () => {
   const compareImages = useCallback((imgData1, imgData2) => {
     const width = imgData1.width;
     const height = imgData1.height;
-    const blockSize = 8;
+    const blockSize = 32; // Increased block size for faster processing
     const hueWeight = 0.5;
     const satWeight = 0.3;
     const valWeight = 0.2;
@@ -70,8 +70,8 @@ const ARImageMatcher = () => {
     
     let bestMatch = {
       score: 0,
-      x: 50,
-      y: 50
+      x: 0,
+      y: 0
     };
 
     for (let y = 0; y < height; y += blockSize) {
@@ -124,11 +124,7 @@ const ARImageMatcher = () => {
       }
     }
 
-    return {
-      score: Math.min(100, bestMatch.score * 1.5),
-      x: bestMatch.x,
-      y: bestMatch.y
-    };
+    return bestMatch;
   }, []);
 
   const playUnmutedVideo = async () => {
@@ -189,13 +185,14 @@ const ARImageMatcher = () => {
     const currentTime = Date.now();
     
     if (matchResult.score > MATCH_THRESHOLD) {
+      console.log('Match detected with score:', matchResult.score, 'at position:', matchResult.x, matchResult.y);
       lastMatchTime.current = currentTime;
       
-      // Use relative positioning for smoother tracking
-      setMatchPosition(prev => ({
-        x: prev.x * 0.8 + matchResult.x * 0.2, // Apply smoothing
-        y: prev.y * 0.8 + matchResult.y * 0.2
-      }));
+      // Update position with smooth transition
+      setMatchPosition({
+        x: matchResult.x,
+        y: matchResult.y
+      });
       
       if (!showMatchVideo) {
         setShowMatchVideo(true);
@@ -285,7 +282,7 @@ const ARImageMatcher = () => {
         aspectRatio: '16/9',
         opacity: showMatchVideo ? 1 : 0,
         visibility: showMatchVideo ? 'visible' : 'hidden',
-        transition: 'all 0.15s ease-out', // Faster transition for better tracking
+        transition: 'all 0.3s ease-out',
         backgroundColor: 'black',
         borderRadius: '12px',
         overflow: 'hidden',
