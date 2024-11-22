@@ -7,17 +7,20 @@ const ARImageMatcher = () => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [matchScore, setMatchScore] = useState(null);
   const [showMatchVideo, setShowMatchVideo] = useState(false);
+  const [hasUserInteraction, setHasUserInteraction] = useState(false);
   const lastMatchTime = useRef(0);
-  const MATCH_TIMEOUT = 300; // Reduced timeout for faster response
+  const MATCH_TIMEOUT = 300;
   const MATCH_THRESHOLD = 70;
 
   const referenceImage = require('./assets/images/reference.jpg');
   const matchVideo = require('./assets/videos/match.mp4');
 
-  // Initialize video when component mounts
   useEffect(() => {
     if (matchVideoRef.current) {
       matchVideoRef.current.load();
+      matchVideoRef.current.muted = false;
+      matchVideoRef.current.setAttribute('playsinline', '');
+      matchVideoRef.current.setAttribute('webkit-playsinline', '');
     }
   }, []);
 
@@ -115,6 +118,32 @@ const ARImageMatcher = () => {
     return Math.min(100, (matchCount / totalBlocks) * 100 * 1.5);
   }, []);
 
+  const playUnmutedVideo = async () => {
+    if (matchVideoRef.current) {
+      try {
+        matchVideoRef.current.volume = 1;
+        matchVideoRef.current.muted = false;
+        await matchVideoRef.current.play();
+        console.log('Video playing with sound');
+      } catch (error) {
+        console.error('Error playing video:', error);
+        try {
+          matchVideoRef.current.muted = true;
+          await matchVideoRef.current.play();
+          matchVideoRef.current.muted = false;
+          console.log('Video playing after fallback');
+        } catch (fallbackError) {
+          console.error('Fallback playback failed:', fallbackError);
+        }
+      }
+    }
+  };
+
+  const handleUserInteraction = async () => {
+    setHasUserInteraction(true);
+    await startCamera();
+  };
+
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -155,17 +184,9 @@ const ARImageMatcher = () => {
       if (!showMatchVideo) {
         console.log('Starting video playback');
         setShowMatchVideo(true);
-        
         if (matchVideoRef.current) {
           matchVideoRef.current.currentTime = 0;
-          const playPromise = matchVideoRef.current.play();
-          if (playPromise !== undefined) {
-            playPromise.then(() => {
-              console.log('Video playing successfully');
-            }).catch(error => {
-              console.error('Error playing video:', error);
-            });
-          }
+          playUnmutedVideo();
         }
       }
     } else if (showMatchVideo && (currentTime - lastMatchTime.current > MATCH_TIMEOUT)) {
@@ -230,7 +251,6 @@ const ARImageMatcher = () => {
       height: '100%',
       overflow: 'hidden'
     }}>
-      {/* Camera Feed */}
       <video
         ref={videoRef}
         style={{
@@ -242,20 +262,20 @@ const ARImageMatcher = () => {
         playsInline
       />
       
-      {/* Match Video Overlay */}
       <div style={{
         position: 'fixed',
         top: '50%',
         left: '50%',
         transform: 'translate(-50%, -50%)',
-        width: '30%', // Smaller size
+        width: '25%',
         aspectRatio: '16/9',
         opacity: showMatchVideo ? 1 : 0,
-        transition: 'opacity 0.3s ease-in-out',
+        visibility: showMatchVideo ? 'visible' : 'hidden',
+        transition: 'opacity 0.3s ease-in-out, visibility 0.3s ease-in-out',
         backgroundColor: 'black',
         borderRadius: '12px',
         overflow: 'hidden',
-        boxShadow: showMatchVideo ? '0 4px 6px rgba(0, 0, 0, 0.1)' : 'none',
+        boxShadow: showMatchVideo ? '0 8px 16px rgba(0, 0, 0, 0.2)' : 'none',
         zIndex: 20
       }}>
         <video
@@ -268,19 +288,21 @@ const ARImageMatcher = () => {
           }}
           playsInline
           loop
-          muted={false}
           controls={false}
+          muted={false}
+          autoPlay={false}
           onError={(e) => console.error('Video error:', e)}
+          onPlay={() => console.log('Video started playing')}
+          onPlaying={() => console.log('Video is playing')}
+          onPause={() => console.log('Video paused')}
         />
       </div>
 
-      {/* Hidden Canvas for Image Processing */}
       <canvas
         ref={canvasRef}
         style={{ display: 'none' }}
       />
       
-      {/* Controls */}
       <div style={{
         position: 'fixed',
         top: '20px',
@@ -288,7 +310,7 @@ const ARImageMatcher = () => {
         zIndex: 30
       }}>
         <button
-          onClick={isStreaming ? stopCamera : startCamera}
+          onClick={hasUserInteraction ? stopCamera : handleUserInteraction}
           style={{
             padding: '8px 16px',
             backgroundColor: isStreaming ? '#dc2626' : '#2563eb',
@@ -299,11 +321,10 @@ const ARImageMatcher = () => {
             fontWeight: '500'
           }}
         >
-          {isStreaming ? "Stop Camera" : "Start Camera"}
+          {isStreaming ? "Stop Camera" : "Start Experience"}
         </button>
       </div>
 
-      {/* Match Score Display */}
       {matchScore !== null && (
         <div style={{
           position: 'fixed',
@@ -315,9 +336,11 @@ const ARImageMatcher = () => {
           borderRadius: '8px',
           zIndex: 30
         }}>
-          <h3 style={{ margin: 0, textAlign: 'center' }}>
+          <h3 style={{ margin: 0, textAlign: 'center', fontSize: '1.2rem' }}>
             Match Score: {matchScore.toFixed(1)}%
-            {matchScore > MATCH_THRESHOLD && " - Match Detected!"}
+            {matchScore > MATCH_THRESHOLD && 
+              <span style={{ color: '#059669' }}> - Match Detected!</span>
+            }
           </h3>
         </div>
       )}
