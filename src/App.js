@@ -8,51 +8,67 @@ const ARMatcher = () => {
   const overlayVideoRef = useRef(null);
   const [isMatched, setIsMatched] = useState(false);
   const [matchPosition, setMatchPosition] = useState({ x: 0, y: 0 });
+  const [cameraError, setCameraError] = useState(null);
+  const [hasCameraPermission, setHasCameraPermission] = useState(false);
+
+  const requestCameraPermission = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        } 
+      });
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        setHasCameraPermission(true);
+        setCameraError(null);
+      }
+      return stream;
+    } catch (err) {
+      console.error("Camera permission error:", err);
+      setCameraError(err.message);
+      setHasCameraPermission(false);
+      return null;
+    }
+  };
 
   useEffect(() => {
     let stream = null;
-    let model = null;
+    let referenceImage = null;
 
-    const loadModel = async () => {
-      model = await tf.loadLayersModel('/assets/model/model.jpg');
-    };
-
-    const initCamera = async () => {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { 
-            facingMode: 'environment',
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          } 
-        });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-      } catch (err) {
-        console.error("Camera error:", err);
-      }
+    const loadReferenceImage = async () => {
+      const img = new Image();
+      img.src = '/assets/model/model.jpg';
+      await img.decode();
+      referenceImage = tf.browser.fromPixels(img)
+        .resizeBilinear([224, 224])
+        .toFloat()
+        .div(255.0);
     };
 
     const detectImage = async (videoElement) => {
-      if (!model || !videoElement) return false;
+      if (!referenceImage || !videoElement) return false;
 
-      const tensor = tf.browser.fromPixels(videoElement)
+      const videoTensor = tf.browser.fromPixels(videoElement)
         .resizeBilinear([224, 224])
-        .expandDims(0)
         .toFloat()
         .div(255.0);
 
-      const prediction = await model.predict(tensor).data();
-      tensor.dispose();
+      const similarity = tf.metrics.cosineProximity(
+        referenceImage.reshape([-1]),
+        videoTensor.reshape([-1])
+      ).dataSync()[0];
 
-      return prediction[0] > 0.8;
+      videoTensor.dispose();
+      return similarity > 0.8;
     };
 
     const processFrame = async () => {
-      if (videoRef.current && canvasRef.current) {
+      if (videoRef.current && hasCameraPermission) {
         const matched = await detectImage(videoRef.current);
-        
         if (matched) {
           const rect = videoRef.current.getBoundingClientRect();
           setMatchPosition({
@@ -60,24 +76,21 @@ const ARMatcher = () => {
             y: rect.height / 2
           });
           setIsMatched(true);
-          
-          if (overlayVideoRef.current && overlayVideoRef.current.paused) {
-            overlayVideoRef.current.play();
+          if (overlayVideoRef.current?.paused) {
+            overlayVideoRef.current.play().catch(console.error);
           }
         } else {
           setIsMatched(false);
-          if (overlayVideoRef.current) {
-            overlayVideoRef.current.pause();
-          }
+          overlayVideoRef.current?.pause();
         }
       }
       requestAnimationFrame(processFrame);
     };
 
     const init = async () => {
-      await loadModel();
-      await initCamera();
-      processFrame();
+      await loadReferenceImage();
+      stream = await requestCameraPermission();
+      if (stream) processFrame();
     };
 
     init();
@@ -86,18 +99,31 @@ const ARMatcher = () => {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
-      if (model) {
-        model.dispose();
+      if (referenceImage) {
+        referenceImage.dispose();
       }
     };
-  }, []);
-
-  const handleVideoError = (error) => {
-    console.error("Video error:", error);
-  };
+  }, [hasCameraPermission]);
 
   return (
     <div className="relative w-full h-screen bg-black">
+      {!hasCameraPermission && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/90">
+          <div className="text-center p-4">
+            <h2 className="text-white text-xl mb-4">Camera Access Required</h2>
+            <button 
+              onClick={requestCameraPermission}
+              className="bg-blue-500 text-white px-4 py-2 rounded-lg"
+            >
+              Enable Camera
+            </button>
+            {cameraError && (
+              <p className="text-red-400 mt-2 text-sm">{cameraError}</p>
+            )}
+          </div>
+        </div>
+      )}
+
       <video 
         ref={videoRef}
         autoPlay 
@@ -130,8 +156,7 @@ const ARMatcher = () => {
             loop
             playsInline
             className="w-full h-full object-cover"
-            src="/assets/model/video.mp4"
-            onError={handleVideoError}
+            src="/assets/model/Simulator Screen Recording - iPhone 15 - 2024-11-22 at 03.36.12o.mp4"
           />
         </div>
       )}
